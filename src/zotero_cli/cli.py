@@ -682,25 +682,703 @@ def suggest_all(
             rprint()
 
 
+def _fetch_abstract_pubmed(doi: str) -> str | None:
+    """Fetch abstract from PubMed using DOI."""
+    import json
+    import urllib.request
+    import urllib.error
+    import xml.etree.ElementTree as ET
+
+    # First, convert DOI to PMID using NCBI's ID converter
+    try:
+        url = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={doi}&format=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "zotero-cli/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+
+        records = data.get("records", [])
+        if not records or "pmid" not in records[0]:
+            return None
+
+        pmid = records[0]["pmid"]
+
+        # Now fetch the abstract from PubMed
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"
+        req = urllib.request.Request(url, headers={"User-Agent": "zotero-cli/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read().decode()
+
+        # Parse XML to extract abstract
+        root = ET.fromstring(xml_data)
+        abstract_elem = root.find(".//AbstractText")
+        if abstract_elem is not None and abstract_elem.text:
+            return abstract_elem.text
+
+        # Try finding multiple AbstractText elements (structured abstracts)
+        abstract_parts = root.findall(".//AbstractText")
+        if abstract_parts:
+            parts = []
+            for part in abstract_parts:
+                label = part.get("Label", "")
+                text = part.text or ""
+                if label and text:
+                    parts.append(f"{label}: {text}")
+                elif text:
+                    parts.append(text)
+            if parts:
+                return " ".join(parts)
+
+        return None
+
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ET.ParseError):
+        return None
+
+
+@app.command("fix")
+def fix_metadata(
+    item_id: int = typer.Argument(..., help="Item ID to fix"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be updated"),
+):
+    """Fill in missing metadata from CrossRef using DOI.
+
+    Looks up the item's DOI and fills in missing fields like
+    abstract, journal, volume, pages, etc.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+    import re
+
+    db = get_db()
+    item = db.get_item(item_id=item_id)
+
+    if not item:
+        rprint(f"[red]Item {item_id} not found.[/red]")
+        raise typer.Exit(1)
+
+    rprint(f"[bold]{item.title}[/bold]")
+
+    if not item.doi:
+        rprint("[red]No DOI found. Cannot look up metadata.[/red]")
+        rprint("[dim]Tip: Add DOI manually in Zotero, then run this again.[/dim]")
+        raise typer.Exit(1)
+
+    rprint(f"[dim]DOI: {item.doi}[/dim]\n")
+
+    # Fetch from CrossRef
+    url = f"https://api.crossref.org/works/{item.doi}"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "zotero-cli/1.0",
+                "Accept": "application/json",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        rprint(f"[red]Failed to fetch from CrossRef: {e}[/red]")
+        raise typer.Exit(1)
+
+    if "message" not in data:
+        rprint("[red]Invalid response from CrossRef[/red]")
+        raise typer.Exit(1)
+
+    msg = data["message"]
+
+    # Extract metadata
+    updates = {}
+
+    # Abstract - try CrossRef first, then PubMed
+    if not item.abstract:
+        abstract = None
+        if msg.get("abstract"):
+            abstract = re.sub(r'<[^>]+>', '', msg["abstract"])  # Strip HTML
+        else:
+            # Try PubMed
+            rprint("[dim]No abstract in CrossRef, trying PubMed...[/dim]")
+            abstract = _fetch_abstract_pubmed(item.doi)
+
+        if abstract:
+            updates["abstractNote"] = abstract
+
+    # Journal
+    if not item.journal and msg.get("container-title"):
+        journal = msg["container-title"]
+        if isinstance(journal, list):
+            journal = journal[0]
+        updates["publicationTitle"] = journal
+
+    # Volume, issue, pages
+    if msg.get("volume"):
+        updates["volume"] = msg["volume"]
+    if msg.get("issue"):
+        updates["issue"] = msg["issue"]
+    if msg.get("page"):
+        updates["pages"] = msg["page"]
+
+    # Publisher
+    if msg.get("publisher"):
+        updates["publisher"] = msg["publisher"]
+
+    # URL
+    if not item.url and msg.get("URL"):
+        updates["url"] = msg["URL"]
+
+    if not updates:
+        rprint("[green]All metadata already present![/green]")
+        return
+
+    # Show what will be updated
+    rprint("[cyan]Updates available:[/cyan]")
+    for field, value in updates.items():
+        display_value = value[:60] + "..." if len(str(value)) > 60 else value
+        rprint(f"  [bold]{field}:[/bold] {display_value}")
+
+    if dry_run:
+        rprint("\n[yellow]Dry run - no changes made[/yellow]")
+        return
+
+    # Apply updates
+    with db.write_connection() as conn:
+        for field_name, value in updates.items():
+            # Get field ID
+            cursor = conn.execute(
+                "SELECT fieldID FROM fieldsCombined WHERE fieldName = ?",
+                (field_name,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                continue
+            field_id = row["fieldID"]
+
+            # Get or create value
+            cursor = conn.execute(
+                "SELECT valueID FROM itemDataValues WHERE value = ?",
+                (value,)
+            )
+            row = cursor.fetchone()
+            if row:
+                value_id = row["valueID"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO itemDataValues (value) VALUES (?)",
+                    (value,)
+                )
+                value_id = cursor.lastrowid
+
+            # Check if field already exists
+            cursor = conn.execute(
+                "SELECT 1 FROM itemData WHERE itemID = ? AND fieldID = ?",
+                (item_id, field_id)
+            )
+            if cursor.fetchone():
+                # Update existing
+                conn.execute(
+                    "UPDATE itemData SET valueID = ? WHERE itemID = ? AND fieldID = ?",
+                    (value_id, item_id, field_id)
+                )
+            else:
+                # Insert new
+                conn.execute(
+                    "INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)",
+                    (item_id, field_id, value_id)
+                )
+
+    rprint(f"\n[green]Updated {len(updates)} fields![/green]")
+
+
+@app.command("incomplete")
+def incomplete_items(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+):
+    """List items with DOI but missing metadata (abstract, volume, etc)."""
+    db = get_db()
+
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT i.itemID,
+                MAX(CASE WHEN f.fieldName='title' THEN idv.value END) as title,
+                MAX(CASE WHEN f.fieldName='DOI' THEN idv.value END) as doi,
+                MAX(CASE WHEN f.fieldName='abstractNote' THEN idv.value END) as abstract,
+                MAX(CASE WHEN f.fieldName='volume' THEN idv.value END) as volume
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            LEFT JOIN itemData id ON i.itemID = id.itemID
+            LEFT JOIN fieldsCombined f ON id.fieldID = f.fieldID
+            LEFT JOIN itemDataValues idv ON id.valueID = idv.valueID
+            LEFT JOIN deletedItems di ON i.itemID = di.itemID
+            WHERE di.itemID IS NULL
+            AND it.typeName NOT IN ('attachment', 'note')
+            GROUP BY i.itemID
+            HAVING doi IS NOT NULL AND (abstract IS NULL OR volume IS NULL)
+            ORDER BY i.dateAdded DESC
+            LIMIT ?
+        """, (limit,))
+
+        rows = cursor.fetchall()
+
+        if not rows:
+            rprint("[green]All items with DOIs have complete metadata![/green]")
+            return
+
+        table = Table(title=f"Items with incomplete metadata ({len(rows)})")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Title", max_width=50)
+        table.add_column("Missing", style="yellow")
+
+        for row in rows:
+            missing = []
+            if not row["abstract"]:
+                missing.append("abstract")
+            if not row["volume"]:
+                missing.append("vol/pages")
+            title = row["title"][:47] + "..." if len(row["title"] or "") > 50 else row["title"]
+            table.add_row(str(row["itemID"]), title, ", ".join(missing))
+
+        console.print(table)
+        rprint(f"\n[dim]Run 'zot fix <ID>' to fill in missing data from CrossRef[/dim]")
+
+
+@app.command("recent")
+def recent_items(
+    limit: int = typer.Option(10, "--limit", "-n", help="Max results"),
+):
+    """List recently added items (newest first).
+
+    Useful for finding newly imported PDFs.
+    """
+    db = get_db()
+
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT i.itemID, i.key, i.dateAdded,
+                MAX(CASE WHEN f.fieldName='title' THEN idv.value END) as title
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            LEFT JOIN itemData id ON i.itemID = id.itemID
+            LEFT JOIN fieldsCombined f ON id.fieldID = f.fieldID
+            LEFT JOIN itemDataValues idv ON id.valueID = idv.valueID
+            LEFT JOIN deletedItems di ON i.itemID = di.itemID
+            WHERE di.itemID IS NULL
+            AND it.typeName NOT IN ('attachment', 'note')
+            GROUP BY i.itemID
+            ORDER BY i.dateAdded DESC
+            LIMIT ?
+        """, (limit,))
+
+        table = Table(title=f"Recently Added ({limit})")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Added", no_wrap=True)
+        table.add_column("Title", max_width=60)
+
+        for row in cursor.fetchall():
+            date_added = row["dateAdded"][:10] if row["dateAdded"] else ""
+            title = row["title"] or "[No title - needs metadata]"
+            if not row["title"]:
+                title = f"[yellow]{title}[/yellow]"
+            table.add_row(str(row["itemID"]), date_added, title)
+
+        console.print(table)
+
+
+def _extract_doi_from_pdf(pdf_path: Path) -> str | None:
+    """Extract DOI from PDF using pdftotext."""
+    import re
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-l", "3", str(pdf_path), "-"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        text = result.stdout
+
+        patterns = [
+            r'doi[:\s]*\s*(10\.\d{4,}/[^\s\]>"]+)',
+            r'DOI[:\s]*\s*(10\.\d{4,}/[^\s\]>"]+)',
+            r'https?://(?:dx\.)?doi\.org/(10\.\d{4,}/[^\s\]>"]+)',
+            r'(10\.\d{4,}/[^\s\]>"]+)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                doi = match.group(1).rstrip('.,;:)')
+                if re.match(r'^10\.\d{4,}/', doi):
+                    return doi
+        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _generate_key() -> str:
+    """Generate random 8-char Zotero key."""
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+
+def _fetch_crossref_metadata(doi: str) -> dict | None:
+    """Fetch full metadata from CrossRef."""
+    import json
+    import urllib.request
+    import re
+
+    url = f"https://api.crossref.org/works/{doi}"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "zotero-cli/1.0", "Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+
+        if "message" not in data:
+            return None
+
+        msg = data["message"]
+        result = {"doi": doi}
+
+        # Title
+        if msg.get("title"):
+            result["title"] = msg["title"][0] if isinstance(msg["title"], list) else msg["title"]
+
+        # Authors
+        authors = []
+        for author in msg.get("author", []):
+            given = author.get("given", "")
+            family = author.get("family", "")
+            authors.append({"first": given, "last": family})
+        result["authors"] = authors
+
+        # Abstract
+        if msg.get("abstract"):
+            result["abstract"] = re.sub(r'<[^>]+>', '', msg["abstract"])
+
+        # Journal
+        if msg.get("container-title"):
+            j = msg["container-title"]
+            result["journal"] = j[0] if isinstance(j, list) else j
+
+        # Date
+        for date_field in ["published-print", "published-online", "created"]:
+            if date_field in msg:
+                date_parts = msg[date_field].get("date-parts", [[]])
+                if date_parts and date_parts[0]:
+                    result["year"] = str(date_parts[0][0])
+                    break
+
+        # Volume, issue, pages
+        if msg.get("volume"):
+            result["volume"] = msg["volume"]
+        if msg.get("issue"):
+            result["issue"] = msg["issue"]
+        if msg.get("page"):
+            result["pages"] = msg["page"]
+
+        return result
+
+    except Exception:
+        return None
+
+
+@app.command("check")
+def check_pdf(
+    pdf_path: str = typer.Argument(..., help="Path to PDF file"),
+):
+    """Check if a PDF's paper is already in your library.
+
+    Extracts DOI from the PDF and searches for it in Zotero.
+    """
+    from pathlib import Path
+
+    pdf = Path(pdf_path).expanduser().resolve()
+
+    if not pdf.exists():
+        rprint(f"[red]File not found: {pdf}[/red]")
+        raise typer.Exit(1)
+
+    # Extract DOI
+    doi = _extract_doi_from_pdf(pdf)
+
+    if not doi:
+        rprint(f"[yellow]No DOI found in:[/yellow] {pdf.name}")
+        raise typer.Exit(1)
+
+    rprint(f"[dim]DOI:[/dim] {doi}")
+
+    # Check if exists
+    db = get_db()
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT i.itemID
+            FROM items i
+            JOIN itemData id ON i.itemID = id.itemID
+            JOIN fieldsCombined f ON id.fieldID = f.fieldID
+            JOIN itemDataValues idv ON id.valueID = idv.valueID
+            LEFT JOIN deletedItems di ON i.itemID = di.itemID
+            WHERE f.fieldName = 'DOI' AND idv.value = ?
+            AND di.itemID IS NULL
+        """, (doi,))
+        existing = cursor.fetchone()
+
+        if existing:
+            item = db.get_item(item_id=existing["itemID"])
+            rprint(f"\n[green]✓ Found in library (ID: {existing['itemID']}):[/green]")
+            rprint(f"  [bold]{item.title}[/bold]")
+            if item.authors:
+                rprint(f"  [dim]Authors:[/dim] {', '.join(item.authors[:3])}")
+            if item.year:
+                rprint(f"  [dim]Year:[/dim] {item.year}")
+            if item.tags:
+                rprint(f"  [dim]Tags:[/dim] {', '.join(item.tags)}")
+        else:
+            rprint(f"\n[yellow]✗ Not in library[/yellow]")
+            rprint(f"[dim]Use 'zot add {pdf}' to add it[/dim]")
+
+
+@app.command("add")
+def add_pdf(
+    pdf_path: str = typer.Argument(..., help="Path to PDF file"),
+    delete: bool = typer.Option(False, "--delete", "-d", help="Delete original after adding"),
+    move_to_trash: bool = typer.Option(False, "--trash", "-t", help="Move original to trash after adding"),
+):
+    """Add a PDF directly to Zotero with automatic metadata lookup.
+
+    Extracts DOI from PDF, fetches metadata from CrossRef/PubMed,
+    and adds directly to Zotero database (no UI interaction needed).
+
+    Example:
+        zot add paper.pdf --trash
+    """
+    import shutil
+    import re
+    from pathlib import Path
+    from datetime import datetime
+
+    pdf = Path(pdf_path).expanduser().resolve()
+
+    if not pdf.exists():
+        rprint(f"[red]File not found: {pdf}[/red]")
+        raise typer.Exit(1)
+
+    if not pdf.suffix.lower() == ".pdf":
+        rprint(f"[yellow]Warning: File may not be a PDF: {pdf.suffix}[/yellow]")
+
+    # Extract DOI
+    rprint("[dim]Extracting DOI from PDF...[/dim]")
+    doi = _extract_doi_from_pdf(pdf)
+
+    if not doi:
+        rprint("[red]No DOI found in PDF. Cannot add without metadata.[/red]")
+        rprint("[dim]Tip: Add manually in Zotero or provide a PDF with DOI.[/dim]")
+        raise typer.Exit(1)
+
+    rprint(f"[green]Found DOI:[/green] {doi}")
+
+    # Check if DOI already exists in library
+    db = get_db()
+    with db.connection() as conn:
+        cursor = conn.execute("""
+            SELECT i.itemID, idv.value as title
+            FROM items i
+            JOIN itemData id ON i.itemID = id.itemID
+            JOIN fieldsCombined f ON id.fieldID = f.fieldID
+            JOIN itemDataValues idv ON id.valueID = idv.valueID
+            LEFT JOIN deletedItems di ON i.itemID = di.itemID
+            WHERE f.fieldName = 'DOI' AND idv.value = ?
+            AND di.itemID IS NULL
+        """, (doi,))
+        existing = cursor.fetchone()
+
+        if existing:
+            # Get title
+            cursor = conn.execute("""
+                SELECT idv.value FROM itemData id
+                JOIN fieldsCombined f ON id.fieldID = f.fieldID
+                JOIN itemDataValues idv ON id.valueID = idv.valueID
+                WHERE id.itemID = ? AND f.fieldName = 'title'
+            """, (existing["itemID"],))
+            title_row = cursor.fetchone()
+            title = title_row["value"] if title_row else "Unknown"
+
+            rprint(f"\n[yellow]⚠ Paper already in library (ID: {existing['itemID']}):[/yellow]")
+            rprint(f"  [bold]{title}[/bold]")
+            rprint(f"\n[dim]Use 'zot show {existing['itemID']}' to view details[/dim]")
+            raise typer.Exit(0)
+
+    # Fetch metadata
+    rprint("[dim]Fetching metadata from CrossRef...[/dim]")
+    metadata = _fetch_crossref_metadata(doi)
+
+    if not metadata or not metadata.get("title"):
+        rprint("[red]Could not fetch metadata from CrossRef.[/red]")
+        raise typer.Exit(1)
+
+    # Try PubMed for abstract if missing
+    if not metadata.get("abstract"):
+        rprint("[dim]Trying PubMed for abstract...[/dim]")
+        abstract = _fetch_abstract_pubmed(doi)
+        if abstract:
+            metadata["abstract"] = abstract
+
+    # Add to Zotero database directly
+    db = get_db()
+    zotero_path = Path.home() / "Zotero"
+    storage_path = zotero_path / "storage"
+
+    item_key = _generate_key()
+    attachment_key = _generate_key()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with db.write_connection() as conn:
+        # Get type IDs
+        cursor = conn.execute("SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle'")
+        item_type_id = cursor.fetchone()["itemTypeID"]
+
+        cursor = conn.execute("SELECT itemTypeID FROM itemTypes WHERE typeName = 'attachment'")
+        attachment_type_id = cursor.fetchone()["itemTypeID"]
+
+        cursor = conn.execute("SELECT libraryID FROM libraries LIMIT 1")
+        library_id = cursor.fetchone()["libraryID"]
+
+        # Insert main item
+        cursor = conn.execute("""
+            INSERT INTO items (itemTypeID, libraryID, key, dateAdded, dateModified, clientDateModified, version, synced)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+        """, (item_type_id, library_id, item_key, now, now, now))
+        item_id = cursor.lastrowid
+
+        # Helper to add field
+        def add_field(field_name: str, value: str):
+            if not value:
+                return
+            cursor = conn.execute("SELECT fieldID FROM fieldsCombined WHERE fieldName = ?", (field_name,))
+            row = cursor.fetchone()
+            if not row:
+                return
+            field_id = row["fieldID"]
+
+            cursor = conn.execute("SELECT valueID FROM itemDataValues WHERE value = ?", (value,))
+            row = cursor.fetchone()
+            if row:
+                value_id = row["valueID"]
+            else:
+                cursor = conn.execute("INSERT INTO itemDataValues (value) VALUES (?)", (value,))
+                value_id = cursor.lastrowid
+
+            conn.execute("INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)",
+                        (item_id, field_id, value_id))
+
+        # Add metadata fields
+        add_field("title", metadata.get("title"))
+        add_field("DOI", metadata.get("doi"))
+        add_field("abstractNote", metadata.get("abstract"))
+        add_field("publicationTitle", metadata.get("journal"))
+        add_field("date", metadata.get("year"))
+        add_field("volume", metadata.get("volume"))
+        add_field("issue", metadata.get("issue"))
+        add_field("pages", metadata.get("pages"))
+
+        # Add authors
+        cursor = conn.execute("SELECT creatorTypeID FROM creatorTypes WHERE creatorType = 'author'")
+        author_type_id = cursor.fetchone()["creatorTypeID"]
+
+        for i, author in enumerate(metadata.get("authors", [])):
+            first = author.get("first", "")
+            last = author.get("last", "")
+
+            cursor = conn.execute(
+                "SELECT creatorID FROM creators WHERE firstName = ? AND lastName = ?",
+                (first, last)
+            )
+            row = cursor.fetchone()
+            if row:
+                creator_id = row["creatorID"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO creators (firstName, lastName) VALUES (?, ?)",
+                    (first, last)
+                )
+                creator_id = cursor.lastrowid
+
+            conn.execute(
+                "INSERT INTO itemCreators (itemID, creatorID, creatorTypeID, orderIndex) VALUES (?, ?, ?, ?)",
+                (item_id, creator_id, author_type_id, i)
+            )
+
+        # Create attachment
+        cursor = conn.execute("""
+            INSERT INTO items (itemTypeID, libraryID, key, dateAdded, dateModified, clientDateModified, version, synced)
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+        """, (attachment_type_id, library_id, attachment_key, now, now, now))
+        attachment_id = cursor.lastrowid
+
+        conn.execute("""
+            INSERT INTO itemAttachments (itemID, parentItemID, linkMode, contentType, path, syncState)
+            VALUES (?, ?, 1, 'application/pdf', ?, 0)
+        """, (attachment_id, item_id, f"storage:{pdf.name}"))
+
+    # Copy PDF to storage
+    dest_dir = storage_path / attachment_key
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pdf, dest_dir / pdf.name)
+
+    # Show result
+    rprint(f"\n[green]✓ Added to Zotero (ID: {item_id}):[/green]")
+    rprint(f"  [bold]{metadata.get('title')}[/bold]")
+    if metadata.get("authors"):
+        author_str = ", ".join(f"{a['first']} {a['last']}" for a in metadata["authors"][:3])
+        if len(metadata["authors"]) > 3:
+            author_str += f" +{len(metadata['authors'])-3} more"
+        rprint(f"  [dim]Authors:[/dim] {author_str}")
+    if metadata.get("year"):
+        rprint(f"  [dim]Year:[/dim] {metadata['year']}")
+    if metadata.get("journal"):
+        rprint(f"  [dim]Journal:[/dim] {metadata['journal']}")
+    if metadata.get("abstract"):
+        abstract_preview = metadata['abstract'][:80] + "..." if len(metadata['abstract']) > 80 else metadata['abstract']
+        rprint(f"  [dim]Abstract:[/dim] {abstract_preview}")
+
+    # Delete/trash original
+    if delete or move_to_trash:
+        if delete:
+            pdf.unlink()
+            rprint(f"[green]Deleted:[/green] {pdf.name}")
+        elif move_to_trash:
+            if sys.platform == "darwin":
+                subprocess.run(["osascript", "-e",
+                    f'tell application "Finder" to delete POSIX file "{pdf}"'])
+                rprint(f"[green]Moved to trash:[/green] {pdf.name}")
+            else:
+                pdf.unlink()
+                rprint(f"[green]Deleted:[/green] {pdf.name}")
+
+
 @app.command("i")
 def interactive(
     query: str = typer.Argument("", help="Initial search query"),
 ):
     """Launch interactive fzf browser.
 
-    Search syntax:
-      - Free text searches all fields
-      - year:2024 - filter by year
-      - author:Weeks - filter by author
-      - tag:method/dms - filter by tag
-      - journal:Nature - filter by journal
+    Search syntax (type in fzf):
+      - a:weeks - author contains "weeks"
+      - a:week* - author starts with "week"
+      - y:2024 - exact year
+      - y:2020-2024 - year range
+      - y:2020+ - 2020 and later
+      - t:method/* - tags under method/
+      - j:nat* - journal starts with "nat"
+      - plain text - search title/abstract
+
+    Combine: a:weeks y:2020+ thermodynamics
 
     Keybindings:
       - Enter: Open in Zotero & copy PDF path
       - Ctrl-O: Open PDF
       - Ctrl-T: Add tag
       - Ctrl-Y: Copy DOI
-      - Tab: Select multiple
     """
     from zotero_cli.interactive import run_interactive, run_tag_selector
     from zotero_cli.obsidian import get_zotero_uri

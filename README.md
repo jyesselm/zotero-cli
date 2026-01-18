@@ -65,10 +65,23 @@ zot i "SHAPE"           # Start with a search query
 | `Tab` | Select multiple items |
 | `Esc` | Exit |
 
-**Search tips:**
-- Type freely to fuzzy-match across all fields
-- Results show: Year, Author, Title, Tags
-- Preview pane shows full details and abstract
+**Search syntax:**
+| Prefix | Example | Description |
+|--------|---------|-------------|
+| `a:` | `a:weeks` | Author contains "weeks" |
+| `a:` | `a:week*` | Author starts with "week" |
+| `y:` | `y:2024` | Exact year |
+| `y:` | `y:2020-2024` | Year range (inclusive) |
+| `y:` | `y:2020+` | 2020 and later |
+| `y:` | `y:-2015` | 2015 and earlier |
+| `t:` | `t:method/dms` | Tag contains "method/dms" |
+| `t:` | `t:method/*` | Any tag under method/ |
+| `j:` | `j:nat*` | Journal starts with "nat" |
+| (text) | `RNA structure` | Search title & abstract |
+
+**Combine filters:** `a:weeks y:2020+ thermodynamics`
+
+Results show: Year, Author, Title, Tags. Preview pane shows full details.
 
 ---
 
@@ -160,6 +173,21 @@ zot open 123 -a "Skim"
 # Print path (useful for scripting)
 zot path 123
 # Output: /Users/you/Zotero/storage/ABC123/Paper.pdf
+```
+
+#### Add PDF to Zotero
+
+```bash
+# Open PDF in Zotero (use "Retrieve Metadata" to import)
+zot add paper.pdf
+
+# Add and move original to trash
+zot add paper.pdf --trash
+zot add paper.pdf -t
+
+# Add and permanently delete original
+zot add paper.pdf --delete
+zot add paper.pdf -d
 ```
 
 ---

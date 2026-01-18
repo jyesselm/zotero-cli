@@ -37,7 +37,7 @@ created: {created}
 **DOI:** {doi_link}
 
 ## Zotero Links
-- [Open in Zotero](zotero://select/items/@{key})
+- [Open in Zotero](zotero://select/items/0_{key})
 - [Open PDF](zotero://open-pdf/library/items/{pdf_key})
 
 ## Tags
@@ -70,11 +70,13 @@ def get_zotero_uri(item: ZoteroItem, uri_type: str = "select") -> str:
         Zotero URI string
     """
     if uri_type == "select":
-        return f"zotero://select/items/@{item.key}"
+        # Format: zotero://select/items/0_{key} (0 = personal library)
+        # This format works across Zotero 5, 6, and 7
+        return f"zotero://select/items/0_{item.key}"
     elif uri_type == "open-pdf":
         return f"zotero://open-pdf/library/items/{item.key}"
     else:
-        return f"zotero://select/items/@{item.key}"
+        return f"zotero://select/items/0_{item.key}"
 
 
 def generate_note_content(
