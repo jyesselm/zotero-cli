@@ -214,7 +214,7 @@ def run_interactive(
         input_text = "\n".join(lines)
 
         # Build fzf command
-        header = "Search: <field>:<value> | Enter=select | Ctrl-O=open PDF | Ctrl-T=add tag | Ctrl-Y=copy DOI"
+        header = "Enter=open in Zotero & copy path | Ctrl-O=open PDF | Ctrl-T=add tag | Ctrl-Y=copy DOI"
 
         fzf_cmd = [
             "fzf",

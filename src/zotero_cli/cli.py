@@ -696,13 +696,14 @@ def interactive(
       - journal:Nature - filter by journal
 
     Keybindings:
-      - Enter: Show item details
+      - Enter: Open in Zotero & copy PDF path
       - Ctrl-O: Open PDF
       - Ctrl-T: Add tag
       - Ctrl-Y: Copy DOI
       - Tab: Select multiple
     """
     from zotero_cli.interactive import run_interactive, run_tag_selector
+    from zotero_cli.obsidian import get_zotero_uri
 
     db = get_db()
 
@@ -717,10 +718,20 @@ def interactive(
 
     for action, item_id in results:
         if action == "select":
-            # Show item details
+            # Open in Zotero and copy PDF path to clipboard
             item = db.get_item(item_id=item_id)
             if item:
-                show(item_id)
+                # Copy PDF path to clipboard
+                if item.pdf_path:
+                    subprocess.run(["pbcopy"], input=str(item.pdf_path).encode(), check=True)
+                    rprint(f"[green]Copied path:[/green] {item.pdf_path}")
+                else:
+                    rprint(f"[yellow]No PDF for this item[/yellow]")
+
+                # Open in Zotero
+                zotero_uri = get_zotero_uri(item, "select")
+                rprint(f"[green]Opening in Zotero:[/green] {item.short_title()}")
+                subprocess.run(["open", zotero_uri])
         elif action == "open":
             # Open PDF
             item = db.get_item(item_id=item_id)
