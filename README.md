@@ -178,7 +178,8 @@ zot path 123
 #### Add PDF to Zotero
 
 ```bash
-# Open PDF in Zotero (use "Retrieve Metadata" to import)
+# Extract DOI, fetch metadata (CrossRef/PubMed), and add directly.
+# Papers already in your library (matched by DOI or title) are not re-added.
 zot add paper.pdf
 
 # Add and move original to trash
@@ -189,6 +190,32 @@ zot add paper.pdf -t
 zot add paper.pdf --delete
 zot add paper.pdf -d
 ```
+
+#### Scan a Directory
+
+Add every PDF in a folder at once, skipping anything already in your library
+and moving the imported originals to the trash.
+
+```bash
+# Add all PDFs in a folder, then trash the originals
+zot scan ~/Downloads/papers
+
+# Include subdirectories
+zot scan ~/Downloads/papers --recursive
+zot scan ~/Downloads/papers -r
+
+# Preview what would happen, without adding or deleting anything
+zot scan ~/Downloads/papers --dry-run
+zot scan ~/Downloads/papers -n
+
+# Add but keep the original PDFs in place
+zot scan ~/Downloads/papers --keep
+zot scan ~/Downloads/papers -k
+```
+
+PDFs that can't be processed (no DOI, or metadata lookup failed) are always
+left in place so you can handle them manually. Duplicates are moved to the
+trash too, since the paper is already in your library.
 
 ---
 

@@ -1,9 +1,12 @@
 """Database access layer for Zotero SQLite database."""
 
+import random
 import shutil
 import sqlite3
+import string
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from zotero_cli.models import Collection, Tag, ZoteroItem
@@ -11,6 +14,11 @@ from zotero_cli.models import Collection, Tag, ZoteroItem
 DEFAULT_ZOTERO_PATH = Path.home() / "Zotero"
 DEFAULT_DB_PATH = DEFAULT_ZOTERO_PATH / "zotero.sqlite"
 DEFAULT_STORAGE_PATH = DEFAULT_ZOTERO_PATH / "storage"
+
+
+def _generate_key() -> str:
+    """Generate a random 8-char Zotero item key."""
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
 class ZoteroDatabase:
@@ -596,3 +604,180 @@ class ZoteroDatabase:
                         self.delete_item(item.item_id)
 
         return to_delete
+
+    def find_existing_item(
+        self, doi: str | None = None, title: str | None = None
+    ) -> int | None:
+        """Find a non-deleted item by DOI (preferred) or exact title.
+
+        Returns the itemID of the first match, or None. Used to avoid adding
+        duplicates. DOI is checked first; title is an exact, case-insensitive
+        fallback for items that lack a DOI.
+        """
+        with self.connection() as conn:
+            if doi:
+                row = conn.execute(
+                    """
+                    SELECT i.itemID
+                    FROM items i
+                    JOIN itemData id ON i.itemID = id.itemID
+                    JOIN fieldsCombined f ON id.fieldID = f.fieldID
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    LEFT JOIN deletedItems di ON i.itemID = di.itemID
+                    WHERE f.fieldName = 'DOI' AND idv.value = ?
+                    AND di.itemID IS NULL
+                    LIMIT 1
+                    """,
+                    (doi,),
+                ).fetchone()
+                if row:
+                    return row["itemID"]
+
+            if title:
+                row = conn.execute(
+                    """
+                    SELECT i.itemID
+                    FROM items i
+                    JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+                    JOIN itemData id ON i.itemID = id.itemID
+                    JOIN fieldsCombined f ON id.fieldID = f.fieldID
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    LEFT JOIN deletedItems di ON i.itemID = di.itemID
+                    WHERE f.fieldName = 'title' AND LOWER(idv.value) = LOWER(?)
+                    AND di.itemID IS NULL
+                    AND it.typeName NOT IN ('attachment', 'note')
+                    LIMIT 1
+                    """,
+                    (title,),
+                ).fetchone()
+                if row:
+                    return row["itemID"]
+
+        return None
+
+    def add_item(self, metadata: dict, pdf_path: Path) -> int:
+        """Add a journalArticle with a PDF attachment to the library.
+
+        Inserts the item, its fields, authors, and a PDF attachment, then
+        copies the PDF into Zotero storage. Returns the new item's ID.
+
+        Note: writes directly to the live database, so Zotero should be closed.
+        Callers are responsible for duplicate checking via find_existing_item.
+        """
+        item_key = _generate_key()
+        attachment_key = _generate_key()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with self.write_connection() as conn:
+            item_type_id = conn.execute(
+                "SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle'"
+            ).fetchone()["itemTypeID"]
+            attachment_type_id = conn.execute(
+                "SELECT itemTypeID FROM itemTypes WHERE typeName = 'attachment'"
+            ).fetchone()["itemTypeID"]
+            library_id = conn.execute(
+                "SELECT libraryID FROM libraries LIMIT 1"
+            ).fetchone()["libraryID"]
+
+            # Insert main item
+            cursor = conn.execute(
+                """
+                INSERT INTO items
+                    (itemTypeID, libraryID, key, dateAdded, dateModified,
+                     clientDateModified, version, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+                """,
+                (item_type_id, library_id, item_key, now, now, now),
+            )
+            item_id = cursor.lastrowid
+
+            def add_field(field_name: str, value: str | None) -> None:
+                if not value:
+                    return
+                row = conn.execute(
+                    "SELECT fieldID FROM fieldsCombined WHERE fieldName = ?",
+                    (field_name,),
+                ).fetchone()
+                if not row:
+                    return
+                field_id = row["fieldID"]
+
+                row = conn.execute(
+                    "SELECT valueID FROM itemDataValues WHERE value = ?", (value,)
+                ).fetchone()
+                if row:
+                    value_id = row["valueID"]
+                else:
+                    value_id = conn.execute(
+                        "INSERT INTO itemDataValues (value) VALUES (?)", (value,)
+                    ).lastrowid
+
+                conn.execute(
+                    "INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)",
+                    (item_id, field_id, value_id),
+                )
+
+            add_field("title", metadata.get("title"))
+            add_field("DOI", metadata.get("doi"))
+            add_field("abstractNote", metadata.get("abstract"))
+            add_field("publicationTitle", metadata.get("journal"))
+            add_field("date", metadata.get("year"))
+            add_field("volume", metadata.get("volume"))
+            add_field("issue", metadata.get("issue"))
+            add_field("pages", metadata.get("pages"))
+
+            # Add authors
+            author_type_id = conn.execute(
+                "SELECT creatorTypeID FROM creatorTypes WHERE creatorType = 'author'"
+            ).fetchone()["creatorTypeID"]
+
+            for i, author in enumerate(metadata.get("authors", [])):
+                first = author.get("first", "")
+                last = author.get("last", "")
+                row = conn.execute(
+                    "SELECT creatorID FROM creators WHERE firstName = ? AND lastName = ?",
+                    (first, last),
+                ).fetchone()
+                if row:
+                    creator_id = row["creatorID"]
+                else:
+                    creator_id = conn.execute(
+                        "INSERT INTO creators (firstName, lastName) VALUES (?, ?)",
+                        (first, last),
+                    ).lastrowid
+
+                conn.execute(
+                    """
+                    INSERT INTO itemCreators (itemID, creatorID, creatorTypeID, orderIndex)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (item_id, creator_id, author_type_id, i),
+                )
+
+            # Create PDF attachment
+            cursor = conn.execute(
+                """
+                INSERT INTO items
+                    (itemTypeID, libraryID, key, dateAdded, dateModified,
+                     clientDateModified, version, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0)
+                """,
+                (attachment_type_id, library_id, attachment_key, now, now, now),
+            )
+            attachment_id = cursor.lastrowid
+
+            conn.execute(
+                """
+                INSERT INTO itemAttachments
+                    (itemID, parentItemID, linkMode, contentType, path, syncState)
+                VALUES (?, ?, 1, 'application/pdf', ?, 0)
+                """,
+                (attachment_id, item_id, f"storage:{pdf_path.name}"),
+            )
+
+        # Copy PDF into Zotero storage (after the write transaction commits)
+        dest_dir = self.storage_path / attachment_key
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf_path, dest_dir / pdf_path.name)
+
+        return item_id

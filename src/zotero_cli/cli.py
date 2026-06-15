@@ -1013,13 +1013,6 @@ def _extract_doi_from_pdf(pdf_path: Path) -> str | None:
         return None
 
 
-def _generate_key() -> str:
-    """Generate random 8-char Zotero key."""
-    import random
-    import string
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
-
 def _fetch_crossref_metadata(doi: str) -> dict | None:
     """Fetch full metadata from CrossRef."""
     import json
@@ -1081,6 +1074,66 @@ def _fetch_crossref_metadata(doi: str) -> dict | None:
 
     except Exception:
         return None
+
+
+def _process_pdf(db: ZoteroDatabase, pdf: Path) -> dict:
+    """Add a single PDF to Zotero, skipping it if already in the library.
+
+    Extracts the DOI, checks for an existing item (by DOI, then title),
+    fetches metadata from CrossRef/PubMed, and inserts the item.
+
+    Returns a dict with a 'status' key, one of:
+      - 'added'       -> also has 'item_id' and 'metadata'
+      - 'duplicate'   -> also has 'item_id' and 'title'
+      - 'no_doi'      -> no DOI could be extracted
+      - 'no_metadata' -> also has 'doi'; CrossRef lookup failed
+    """
+    doi = _extract_doi_from_pdf(pdf)
+    if not doi:
+        return {"status": "no_doi"}
+
+    # Duplicate check by DOI before doing any network lookup
+    existing = db.find_existing_item(doi=doi)
+    if existing:
+        item = db.get_item(item_id=existing)
+        return {"status": "duplicate", "item_id": existing, "title": item.title if item else ""}
+
+    metadata = _fetch_crossref_metadata(doi)
+    if not metadata or not metadata.get("title"):
+        return {"status": "no_metadata", "doi": doi}
+
+    # Secondary duplicate check by title (catches items added without a DOI)
+    existing = db.find_existing_item(title=metadata["title"])
+    if existing:
+        item = db.get_item(item_id=existing)
+        return {
+            "status": "duplicate",
+            "item_id": existing,
+            "title": item.title if item else metadata["title"],
+        }
+
+    # Fill in abstract from PubMed if CrossRef didn't have one
+    if not metadata.get("abstract"):
+        abstract = _fetch_abstract_pubmed(doi)
+        if abstract:
+            metadata["abstract"] = abstract
+
+    item_id = db.add_item(metadata, pdf)
+    return {"status": "added", "item_id": item_id, "metadata": metadata}
+
+
+def _remove_original(pdf: Path, to_trash: bool, quiet: bool = False) -> None:
+    """Delete or (on macOS) move the original PDF to the trash."""
+    if to_trash and sys.platform == "darwin":
+        subprocess.run(
+            ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{pdf}"']
+        )
+        if not quiet:
+            rprint(f"[green]Moved to trash:[/green] {pdf.name}")
+    else:
+        pdf.unlink()
+        if not quiet:
+            rprint(f"[green]Deleted:[/green] {pdf.name}")
 
 
 @app.command("check")
@@ -1146,16 +1199,14 @@ def add_pdf(
 ):
     """Add a PDF directly to Zotero with automatic metadata lookup.
 
-    Extracts DOI from PDF, fetches metadata from CrossRef/PubMed,
-    and adds directly to Zotero database (no UI interaction needed).
+    Extracts DOI from PDF, fetches metadata from CrossRef/PubMed, and adds
+    directly to the Zotero database (no UI interaction needed). Papers already
+    in your library (matched by DOI or title) are not added again.
 
     Example:
         zot add paper.pdf --trash
     """
-    import shutil
-    import re
     from pathlib import Path
-    from datetime import datetime
 
     pdf = Path(pdf_path).expanduser().resolve()
 
@@ -1166,167 +1217,33 @@ def add_pdf(
     if not pdf.suffix.lower() == ".pdf":
         rprint(f"[yellow]Warning: File may not be a PDF: {pdf.suffix}[/yellow]")
 
-    # Extract DOI
-    rprint("[dim]Extracting DOI from PDF...[/dim]")
-    doi = _extract_doi_from_pdf(pdf)
+    db = get_db()
+    rprint(f"[dim]Processing {pdf.name}...[/dim]")
+    result = _process_pdf(db, pdf)
+    status = result["status"]
 
-    if not doi:
+    if status == "no_doi":
         rprint("[red]No DOI found in PDF. Cannot add without metadata.[/red]")
         rprint("[dim]Tip: Add manually in Zotero or provide a PDF with DOI.[/dim]")
         raise typer.Exit(1)
 
-    rprint(f"[green]Found DOI:[/green] {doi}")
-
-    # Check if DOI already exists in library
-    db = get_db()
-    with db.connection() as conn:
-        cursor = conn.execute("""
-            SELECT i.itemID, idv.value as title
-            FROM items i
-            JOIN itemData id ON i.itemID = id.itemID
-            JOIN fieldsCombined f ON id.fieldID = f.fieldID
-            JOIN itemDataValues idv ON id.valueID = idv.valueID
-            LEFT JOIN deletedItems di ON i.itemID = di.itemID
-            WHERE f.fieldName = 'DOI' AND idv.value = ?
-            AND di.itemID IS NULL
-        """, (doi,))
-        existing = cursor.fetchone()
-
-        if existing:
-            # Get title
-            cursor = conn.execute("""
-                SELECT idv.value FROM itemData id
-                JOIN fieldsCombined f ON id.fieldID = f.fieldID
-                JOIN itemDataValues idv ON id.valueID = idv.valueID
-                WHERE id.itemID = ? AND f.fieldName = 'title'
-            """, (existing["itemID"],))
-            title_row = cursor.fetchone()
-            title = title_row["value"] if title_row else "Unknown"
-
-            rprint(f"\n[yellow]⚠ Paper already in library (ID: {existing['itemID']}):[/yellow]")
-            rprint(f"  [bold]{title}[/bold]")
-            rprint(f"\n[dim]Use 'zot show {existing['itemID']}' to view details[/dim]")
-            raise typer.Exit(0)
-
-    # Fetch metadata
-    rprint("[dim]Fetching metadata from CrossRef...[/dim]")
-    metadata = _fetch_crossref_metadata(doi)
-
-    if not metadata or not metadata.get("title"):
-        rprint("[red]Could not fetch metadata from CrossRef.[/red]")
+    if status == "no_metadata":
+        rprint(f"[red]Could not fetch metadata from CrossRef for DOI: {result['doi']}[/red]")
         raise typer.Exit(1)
 
-    # Try PubMed for abstract if missing
-    if not metadata.get("abstract"):
-        rprint("[dim]Trying PubMed for abstract...[/dim]")
-        abstract = _fetch_abstract_pubmed(doi)
-        if abstract:
-            metadata["abstract"] = abstract
+    if status == "duplicate":
+        rprint(f"\n[yellow]⚠ Already in library (ID: {result['item_id']}):[/yellow]")
+        rprint(f"  [bold]{result['title']}[/bold]")
+        rprint(f"\n[dim]Use 'zot show {result['item_id']}' to view details[/dim]")
+        if delete:
+            _remove_original(pdf, to_trash=False)
+        elif move_to_trash:
+            _remove_original(pdf, to_trash=True)
+        raise typer.Exit(0)
 
-    # Add to Zotero database directly
-    db = get_db()
-    zotero_path = Path.home() / "Zotero"
-    storage_path = zotero_path / "storage"
-
-    item_key = _generate_key()
-    attachment_key = _generate_key()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    with db.write_connection() as conn:
-        # Get type IDs
-        cursor = conn.execute("SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle'")
-        item_type_id = cursor.fetchone()["itemTypeID"]
-
-        cursor = conn.execute("SELECT itemTypeID FROM itemTypes WHERE typeName = 'attachment'")
-        attachment_type_id = cursor.fetchone()["itemTypeID"]
-
-        cursor = conn.execute("SELECT libraryID FROM libraries LIMIT 1")
-        library_id = cursor.fetchone()["libraryID"]
-
-        # Insert main item
-        cursor = conn.execute("""
-            INSERT INTO items (itemTypeID, libraryID, key, dateAdded, dateModified, clientDateModified, version, synced)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
-        """, (item_type_id, library_id, item_key, now, now, now))
-        item_id = cursor.lastrowid
-
-        # Helper to add field
-        def add_field(field_name: str, value: str):
-            if not value:
-                return
-            cursor = conn.execute("SELECT fieldID FROM fieldsCombined WHERE fieldName = ?", (field_name,))
-            row = cursor.fetchone()
-            if not row:
-                return
-            field_id = row["fieldID"]
-
-            cursor = conn.execute("SELECT valueID FROM itemDataValues WHERE value = ?", (value,))
-            row = cursor.fetchone()
-            if row:
-                value_id = row["valueID"]
-            else:
-                cursor = conn.execute("INSERT INTO itemDataValues (value) VALUES (?)", (value,))
-                value_id = cursor.lastrowid
-
-            conn.execute("INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)",
-                        (item_id, field_id, value_id))
-
-        # Add metadata fields
-        add_field("title", metadata.get("title"))
-        add_field("DOI", metadata.get("doi"))
-        add_field("abstractNote", metadata.get("abstract"))
-        add_field("publicationTitle", metadata.get("journal"))
-        add_field("date", metadata.get("year"))
-        add_field("volume", metadata.get("volume"))
-        add_field("issue", metadata.get("issue"))
-        add_field("pages", metadata.get("pages"))
-
-        # Add authors
-        cursor = conn.execute("SELECT creatorTypeID FROM creatorTypes WHERE creatorType = 'author'")
-        author_type_id = cursor.fetchone()["creatorTypeID"]
-
-        for i, author in enumerate(metadata.get("authors", [])):
-            first = author.get("first", "")
-            last = author.get("last", "")
-
-            cursor = conn.execute(
-                "SELECT creatorID FROM creators WHERE firstName = ? AND lastName = ?",
-                (first, last)
-            )
-            row = cursor.fetchone()
-            if row:
-                creator_id = row["creatorID"]
-            else:
-                cursor = conn.execute(
-                    "INSERT INTO creators (firstName, lastName) VALUES (?, ?)",
-                    (first, last)
-                )
-                creator_id = cursor.lastrowid
-
-            conn.execute(
-                "INSERT INTO itemCreators (itemID, creatorID, creatorTypeID, orderIndex) VALUES (?, ?, ?, ?)",
-                (item_id, creator_id, author_type_id, i)
-            )
-
-        # Create attachment
-        cursor = conn.execute("""
-            INSERT INTO items (itemTypeID, libraryID, key, dateAdded, dateModified, clientDateModified, version, synced)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 0)
-        """, (attachment_type_id, library_id, attachment_key, now, now, now))
-        attachment_id = cursor.lastrowid
-
-        conn.execute("""
-            INSERT INTO itemAttachments (itemID, parentItemID, linkMode, contentType, path, syncState)
-            VALUES (?, ?, 1, 'application/pdf', ?, 0)
-        """, (attachment_id, item_id, f"storage:{pdf.name}"))
-
-    # Copy PDF to storage
-    dest_dir = storage_path / attachment_key
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(pdf, dest_dir / pdf.name)
-
-    # Show result
-    rprint(f"\n[green]✓ Added to Zotero (ID: {item_id}):[/green]")
+    # status == "added"
+    metadata = result["metadata"]
+    rprint(f"\n[green]✓ Added to Zotero (ID: {result['item_id']}):[/green]")
     rprint(f"  [bold]{metadata.get('title')}[/bold]")
     if metadata.get("authors"):
         author_str = ", ".join(f"{a['first']} {a['last']}" for a in metadata["authors"][:3])
@@ -1338,22 +1255,103 @@ def add_pdf(
     if metadata.get("journal"):
         rprint(f"  [dim]Journal:[/dim] {metadata['journal']}")
     if metadata.get("abstract"):
-        abstract_preview = metadata['abstract'][:80] + "..." if len(metadata['abstract']) > 80 else metadata['abstract']
-        rprint(f"  [dim]Abstract:[/dim] {abstract_preview}")
+        abstract = metadata["abstract"]
+        preview = abstract[:80] + "..." if len(abstract) > 80 else abstract
+        rprint(f"  [dim]Abstract:[/dim] {preview}")
 
     # Delete/trash original
-    if delete or move_to_trash:
-        if delete:
-            pdf.unlink()
-            rprint(f"[green]Deleted:[/green] {pdf.name}")
-        elif move_to_trash:
-            if sys.platform == "darwin":
-                subprocess.run(["osascript", "-e",
-                    f'tell application "Finder" to delete POSIX file "{pdf}"'])
-                rprint(f"[green]Moved to trash:[/green] {pdf.name}")
+    if delete:
+        _remove_original(pdf, to_trash=False)
+    elif move_to_trash:
+        _remove_original(pdf, to_trash=True)
+
+
+@app.command("scan")
+def scan_dir(
+    directory: str = typer.Argument(..., help="Directory to scan for PDFs"),
+    recursive: bool = typer.Option(False, "--recursive", "-r", help="Include subdirectories"),
+    keep: bool = typer.Option(False, "--keep", "-k", help="Keep PDFs (don't move to trash)"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Preview without changes"),
+):
+    """Scan a directory and add all PDFs to Zotero, then trash the originals.
+
+    For each PDF the DOI is extracted and metadata fetched from CrossRef/PubMed.
+    Papers already in your library (matched by DOI or title) are skipped. Added
+    and duplicate PDFs are moved to the trash unless --keep is given; PDFs that
+    could not be processed are always left in place.
+
+    Example:
+        zot scan ~/Downloads/papers
+    """
+    from pathlib import Path
+
+    dir_path = Path(directory).expanduser().resolve()
+    if not dir_path.is_dir():
+        rprint(f"[red]Not a directory: {dir_path}[/red]")
+        raise typer.Exit(1)
+
+    glob_pat = "**/*" if recursive else "*"
+    pdfs = sorted(
+        p for p in dir_path.glob(glob_pat) if p.is_file() and p.suffix.lower() == ".pdf"
+    )
+
+    if not pdfs:
+        rprint(f"[yellow]No PDFs found in {dir_path}[/yellow]")
+        return
+
+    rprint(f"[bold]Scanning {len(pdfs)} PDF(s) in {dir_path}[/bold]")
+    if dry_run:
+        rprint("[yellow]DRY RUN - no changes will be made[/yellow]")
+    rprint()
+
+    db = get_db()
+    counts = {"added": 0, "duplicate": 0, "no_doi": 0, "no_metadata": 0}
+
+    for pdf in pdfs:
+        if dry_run:
+            doi = _extract_doi_from_pdf(pdf)
+            if not doi:
+                counts["no_doi"] += 1
+                rprint(f"  [red]?[/red] {pdf.name} [dim]— no DOI[/dim]")
+            elif db.find_existing_item(doi=doi):
+                counts["duplicate"] += 1
+                rprint(f"  [yellow]=[/yellow] {pdf.name} [dim]— already in library[/dim]")
             else:
-                pdf.unlink()
-                rprint(f"[green]Deleted:[/green] {pdf.name}")
+                counts["added"] += 1
+                rprint(f"  [green]+[/green] {pdf.name} [dim]— would add ({doi})[/dim]")
+            continue
+
+        result = _process_pdf(db, pdf)
+        status = result["status"]
+        counts[status] += 1
+
+        if status == "added":
+            title = (result["metadata"].get("title") or "")[:50]
+            rprint(f"  [green]+[/green] {pdf.name} [dim]— {title}[/dim]")
+        elif status == "duplicate":
+            rprint(f"  [yellow]=[/yellow] {pdf.name} [dim]— in library (ID {result['item_id']})[/dim]")
+        elif status == "no_doi":
+            rprint(f"  [red]?[/red] {pdf.name} [dim]— no DOI, skipped[/dim]")
+        else:  # no_metadata
+            rprint(f"  [red]✗[/red] {pdf.name} [dim]— metadata lookup failed, skipped[/dim]")
+
+        # Trash originals that are now in the library
+        if not keep and status in ("added", "duplicate"):
+            _remove_original(pdf, to_trash=True, quiet=True)
+
+    rprint()
+    rprint(
+        f"[bold]Summary:[/bold] "
+        f"[green]{counts['added']} added[/green], "
+        f"[yellow]{counts['duplicate']} duplicate[/yellow], "
+        f"[dim]{counts['no_doi']} no-DOI, {counts['no_metadata']} failed[/dim]"
+    )
+    if dry_run:
+        rprint("[dim]Run without --dry-run to apply.[/dim]")
+    elif not keep and (counts["added"] or counts["duplicate"]):
+        moved = counts["added"] + counts["duplicate"]
+        left = counts["no_doi"] + counts["no_metadata"]
+        rprint(f"[dim]Moved {moved} PDF(s) to trash. {left} left in place.[/dim]")
 
 
 @app.command("i")
