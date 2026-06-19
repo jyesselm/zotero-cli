@@ -22,8 +22,24 @@ def _generate_key() -> str:
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
+def build_filename(citekey: str, title: str, suffix: str = ".pdf") -> str:
+    """Build a terminal-safe, dash-separated filename: 'Weeks2024-Title-words.pdf'.
+
+    Strips filesystem-illegal characters, replaces whitespace with dashes,
+    collapses repeats, and truncates. Used for both stored attachments and
+    the browsable mirror so they stay consistent.
+    """
+    citekey = (citekey or "").strip()
+    title = (title or "").strip()
+    raw = f"{citekey} {title}".strip() if citekey else (title or "untitled")
+    raw = re.sub(r'[/\\:*?"<>|]', "", raw)  # strip filesystem-illegal chars
+    raw = re.sub(r"\s+", "-", raw)          # spaces -> dashes (terminal-friendly)
+    raw = re.sub(r"-+", "-", raw).strip("-")[:120].rstrip("-. ")
+    return f"{raw or 'untitled'}{suffix}"
+
+
 def _storage_filename(metadata: dict, original: Path) -> str:
-    """Build a Finder-searchable filename like 'Weeks2024 - Title.pdf'.
+    """Build a Finder-searchable storage filename from CrossRef metadata.
 
     Uses first-author surname + year as a citekey prefix, then the title.
     Falls back to the original filename if metadata is too sparse.
@@ -32,14 +48,10 @@ def _storage_filename(metadata: dict, original: Path) -> str:
     last = authors[0].get("last", "").strip() if authors else ""
     year = (metadata.get("year") or "").strip()
     title = (metadata.get("title") or "").strip()
-    cite = f"{last}{year}".strip()
-    if cite and title:
-        stem = f"{cite} - {title}"
-    else:
-        stem = cite or title or original.stem
-    stem = re.sub(r'[/\\:*?"<>|]', "", stem)  # strip filesystem-illegal chars
-    stem = re.sub(r"\s+", " ", stem).strip()[:120].rstrip(" .")
-    return f"{stem}{original.suffix or '.pdf'}"
+    citekey = f"{last}{year}"
+    if not citekey and not title:
+        return original.name
+    return build_filename(citekey, title, original.suffix or ".pdf")
 
 
 class ZoteroDatabase:

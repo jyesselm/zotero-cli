@@ -504,6 +504,63 @@ def dedup(
         rprint(f"\n[green]Moved {len(to_delete)} items to Zotero trash[/green]")
 
 
+@app.command()
+def mirror(
+    dest: str = typer.Option("~/local/papers", "--dest", "-d", help="Destination directory"),
+    copy: bool = typer.Option(False, "--copy", help="Copy files instead of symlinking"),
+    clean: bool = typer.Option(False, "--clean", help="Remove the destination tree first"),
+):
+    """Build a browsable Author/Year tree of your library PDFs.
+
+    Creates symlinks (or copies, with --copy) under DEST, organized as
+    Author/Year/Citekey-Title.pdf and pointing at Zotero's storage. Zotero's
+    own storage is left untouched. Safe to rerun; use --clean to rebuild from
+    scratch (e.g. after deleting papers).
+    """
+    import re as _re
+    import shutil as _shutil
+    from pathlib import Path
+
+    from zotero_cli.database import build_filename
+
+    dest_root = Path(dest).expanduser()
+    db = get_db()
+    items = [it for it in db.search(limit=100000) if it.pdf_path]
+
+    if not items:
+        rprint("[yellow]No items with PDFs found.[/yellow]")
+        return
+
+    if clean and dest_root.exists():
+        _shutil.rmtree(dest_root)
+
+    made = 0
+    used: set[str] = set()
+    for it in items:
+        author = _re.sub(r'[/\\:*?"<>|]', "", it.first_author or "Unknown").strip() or "Unknown"
+        year = it.year or "no-year"
+        folder = dest_root / author / year
+        folder.mkdir(parents=True, exist_ok=True)
+
+        fname = build_filename(it.citation_key or author, it.title, it.pdf_path.suffix or ".pdf")
+        link = folder / fname
+        if str(link) in used:  # disambiguate two papers that map to the same name
+            link = folder / f"{link.stem}-{it.item_id}{link.suffix}"
+        used.add(str(link))
+
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        if copy:
+            _shutil.copy2(it.pdf_path, link)
+        else:
+            link.symlink_to(it.pdf_path)
+        made += 1
+
+    kind = "copies" if copy else "symlinks"
+    rprint(f"[green]Mirrored {made} PDFs[/green] as {kind} under [bold]{dest_root}[/bold]")
+    rprint(f"[dim]Browse: open {dest_root}   |   rebuild: zot mirror --clean[/dim]")
+
+
 # Obsidian integration commands
 @app.command()
 def note(
