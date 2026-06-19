@@ -1,6 +1,7 @@
 """Database access layer for Zotero SQLite database."""
 
 import random
+import re
 import shutil
 import sqlite3
 import string
@@ -19,6 +20,26 @@ DEFAULT_STORAGE_PATH = DEFAULT_ZOTERO_PATH / "storage"
 def _generate_key() -> str:
     """Generate a random 8-char Zotero item key."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+
+def _storage_filename(metadata: dict, original: Path) -> str:
+    """Build a Finder-searchable filename like 'Weeks2024 - Title.pdf'.
+
+    Uses first-author surname + year as a citekey prefix, then the title.
+    Falls back to the original filename if metadata is too sparse.
+    """
+    authors = metadata.get("authors") or []
+    last = authors[0].get("last", "").strip() if authors else ""
+    year = (metadata.get("year") or "").strip()
+    title = (metadata.get("title") or "").strip()
+    cite = f"{last}{year}".strip()
+    if cite and title:
+        stem = f"{cite} - {title}"
+    else:
+        stem = cite or title or original.stem
+    stem = re.sub(r'[/\\:*?"<>|]', "", stem)  # strip filesystem-illegal chars
+    stem = re.sub(r"\s+", " ", stem).strip()[:120].rstrip(" .")
+    return f"{stem}{original.suffix or '.pdf'}"
 
 
 class ZoteroDatabase:
@@ -415,6 +436,24 @@ class ZoteroDatabase:
             )
             return cursor.fetchone()["count"]
 
+    def delete_tag(self, name: str) -> int:
+        """Delete a tag entirely, removing it from all items.
+
+        Returns the number of items the tag was removed from. Use for
+        clearing junk/auto-imported tags that have no place in the scheme.
+        """
+        with self.write_connection() as conn:
+            row = conn.execute("SELECT tagID FROM tags WHERE name = ?", (name,)).fetchone()
+            if not row:
+                return 0
+            tag_id = row["tagID"]
+            count = conn.execute(
+                "SELECT COUNT(*) AS c FROM itemTags WHERE tagID = ?", (tag_id,)
+            ).fetchone()["c"]
+            conn.execute("DELETE FROM itemTags WHERE tagID = ?", (tag_id,))
+            conn.execute("DELETE FROM tags WHERE tagID = ?", (tag_id,))
+            return count
+
     def get_untagged_items(self, limit: int = 100) -> list[ZoteroItem]:
         """Get items with no tags."""
         with self.connection() as conn:
@@ -766,18 +805,19 @@ class ZoteroDatabase:
             )
             attachment_id = cursor.lastrowid
 
+            filename = _storage_filename(metadata, pdf_path)
             conn.execute(
                 """
                 INSERT INTO itemAttachments
                     (itemID, parentItemID, linkMode, contentType, path, syncState)
                 VALUES (?, ?, 1, 'application/pdf', ?, 0)
                 """,
-                (attachment_id, item_id, f"storage:{pdf_path.name}"),
+                (attachment_id, item_id, f"storage:{filename}"),
             )
 
         # Copy PDF into Zotero storage (after the write transaction commits)
         dest_dir = self.storage_path / attachment_key
         dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(pdf_path, dest_dir / pdf_path.name)
+        shutil.copy2(pdf_path, dest_dir / filename)
 
         return item_id

@@ -333,6 +333,30 @@ def retag(
         rprint(f"[yellow]Tag '{old_tag}' not found.[/yellow]")
 
 
+@app.command()
+def deltag(
+    tag_name: str = typer.Argument(..., help="Tag to delete globally"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Delete a tag entirely, removing it from all items."""
+    db = get_db()
+
+    all_tags = db.get_all_tags()
+    match = next((t for t in all_tags if t.name == tag_name), None)
+    if not match:
+        rprint(f"[yellow]Tag '{tag_name}' not found.[/yellow]")
+        raise typer.Exit(1)
+
+    if not yes:
+        rprint(f"Delete tag [cyan]{tag_name}[/cyan] from [bold]{match.count}[/bold] items?")
+        if not typer.confirm("Proceed?"):
+            rprint("[dim]Aborted.[/dim]")
+            raise typer.Exit(0)
+
+    count = db.delete_tag(tag_name)
+    rprint(f"[green]Deleted '{tag_name}' from {count} items[/green]")
+
+
 # Collection commands
 @app.command()
 def collections(
