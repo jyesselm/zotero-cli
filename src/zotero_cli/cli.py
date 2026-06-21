@@ -333,6 +333,56 @@ def retag(
         rprint(f"[yellow]Tag '{old_tag}' not found.[/yellow]")
 
 
+@app.command("tags-export")
+def tags_export(
+    out: str = typer.Option(
+        "~/.config/zotero-cli/tags.json", "--out", "-o", help="Output JSON path"
+    ),
+):
+    """Export all item tags to a portable JSON (keyed by Zotero item key).
+
+    Store the file somewhere synced (Dropbox, a git repo, ...) and run
+    'zot tags-import' on another computer to replicate the tags.
+    """
+    import json
+    from pathlib import Path
+
+    db = get_db()
+    mapping = db.export_tags()
+    p = Path(out).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "item_count": len(mapping), "tags": mapping}
+    p.write_text(json.dumps(payload, indent=1, ensure_ascii=False))
+    total = sum(len(v) for v in mapping.values())
+    rprint(f"[green]Exported {total} tags across {len(mapping)} items[/green] → {p}")
+
+
+@app.command("tags-import")
+def tags_import(
+    path: str = typer.Argument(..., help="Tag-map JSON produced by tags-export"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Preview without applying"),
+):
+    """Apply a tag-map JSON to this computer's library (matched by item key).
+
+    Additive: adds missing tags, never removes. Run after the items
+    themselves have synced to this machine.
+    """
+    import json
+    from pathlib import Path
+
+    db = get_db()
+    data = json.loads(Path(path).expanduser().read_text())
+    mapping = data.get("tags", data)
+    applied, matched, missing = db.import_tags(mapping, dry_run=dry_run)
+    word = "Would apply" if dry_run else "Applied"
+    rprint(f"[green]{word} {applied} new tags[/green] to {matched} items")
+    if missing:
+        rprint(f"[yellow]{missing} items in the file aren't in this library yet[/yellow] "
+               "[dim](let Zotero sync first, then re-run)[/dim]")
+    if dry_run:
+        rprint("[dim]Run without --dry-run to apply.[/dim]")
+
+
 @app.command()
 def deltag(
     tag_name: str = typer.Argument(..., help="Tag to delete globally"),

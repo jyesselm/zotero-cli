@@ -466,6 +466,66 @@ class ZoteroDatabase:
             conn.execute("DELETE FROM tags WHERE tagID = ?", (tag_id,))
             return count
 
+    def export_tags(self) -> dict[str, list[str]]:
+        """Export every item's tags keyed by Zotero item key.
+
+        The item key is stable across synced copies of a library, so the
+        result can be re-applied on another computer with import_tags().
+        """
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.key, t.name
+                FROM items i
+                JOIN itemTags it ON i.itemID = it.itemID
+                JOIN tags t ON it.tagID = t.tagID
+                LEFT JOIN deletedItems di ON i.itemID = di.itemID
+                WHERE di.itemID IS NULL
+                ORDER BY i.key, t.name
+                """
+            ).fetchall()
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            out.setdefault(r["key"], []).append(r["name"])
+        return out
+
+    def import_tags(
+        self, mapping: dict[str, list[str]], dry_run: bool = False
+    ) -> tuple[int, int, int]:
+        """Apply a key->tags mapping to the local library.
+
+        Adds any missing tags to items matched by key. Returns
+        (tags_applied, items_matched, items_in_file_not_found_locally).
+        """
+        applied = matched = missing = 0
+        conn_ctx = self.connection() if dry_run else self.write_connection()
+        with conn_ctx as conn:
+            for key, tags in mapping.items():
+                row = conn.execute("SELECT itemID FROM items WHERE key = ?", (key,)).fetchone()
+                if not row:
+                    missing += 1
+                    continue
+                matched += 1
+                item_id = row["itemID"]
+                for name in tags:
+                    r = conn.execute("SELECT tagID FROM tags WHERE name = ?", (name,)).fetchone()
+                    tag_id = r["tagID"] if r else None
+                    if tag_id and conn.execute(
+                        "SELECT 1 FROM itemTags WHERE itemID = ? AND tagID = ?", (item_id, tag_id)
+                    ).fetchone():
+                        continue
+                    applied += 1
+                    if not dry_run:
+                        if tag_id is None:
+                            tag_id = conn.execute(
+                                "INSERT INTO tags (name) VALUES (?)", (name,)
+                            ).lastrowid
+                        conn.execute(
+                            "INSERT INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)",
+                            (item_id, tag_id),
+                        )
+        return applied, matched, missing
+
     def get_untagged_items(self, limit: int = 100) -> list[ZoteroItem]:
         """Get items with no tags."""
         with self.connection() as conn:
@@ -785,6 +845,8 @@ class ZoteroDatabase:
             for i, author in enumerate(metadata.get("authors", [])):
                 first = author.get("first", "")
                 last = author.get("last", "")
+                if not (first.strip() or last.strip()):
+                    continue  # Zotero rejects empty creators (e.g. CrossRef consortium authors)
                 row = conn.execute(
                     "SELECT creatorID FROM creators WHERE firstName = ? AND lastName = ?",
                     (first, last),
