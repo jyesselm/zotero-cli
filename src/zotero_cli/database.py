@@ -4,7 +4,6 @@ import random
 import re
 import shutil
 import sqlite3
-import string
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -17,9 +16,14 @@ DEFAULT_DB_PATH = DEFAULT_ZOTERO_PATH / "zotero.sqlite"
 DEFAULT_STORAGE_PATH = DEFAULT_ZOTERO_PATH / "storage"
 
 
+# Zotero keys use a restricted base32 alphabet (no 0, 1, O, or lowercase);
+# anything outside it is rejected by the sync server.
+KEY_ALPHABET = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
+
+
 def _generate_key() -> str:
-    """Generate a random 8-char Zotero item key."""
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    """Generate a random 8-char Zotero item key from the valid alphabet."""
+    return "".join(random.choices(KEY_ALPHABET, k=8))
 
 
 def build_filename(citekey: str, title: str, suffix: str = ".pdf") -> str:
