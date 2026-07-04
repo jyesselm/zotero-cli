@@ -428,6 +428,7 @@ def _runin_split(b):
 def build_reading_note(path: str, slug: str, fig_by_label: dict, title: str = "") -> str:
     """Reconstruct a readable, markdown-safe paper body with inline figures."""
     doc = fitz.open(path)
+    npages = doc.page_count
     comp = collect_compounds(doc)
     bf = _body_font(doc)
     pt, pns, pmp = poppler_index(path)
@@ -477,10 +478,16 @@ def build_reading_note(path: str, slug: str, fig_by_label: dict, title: str = ""
                 continue
             if _inside_figure(r, regs):
                 continue
+            # End-matter/references stop — but ONLY in the latter part of the paper.
+            # Some journals (e.g. PNAS, Nature) print "Author contributions" /
+            # "Competing interests" in page-1 furniture; matching those early would
+            # truncate the whole body. Before the halfway point, skip the block instead.
             if REFSTOP.match(txt) or ENDMATTER.match(txt):
-                flush()
-                doc.close()
-                return "\n".join(out)
+                if page.number >= max(1, npages // 2):
+                    flush()
+                    doc.close()
+                    return "\n".join(out)
+                continue  # front-matter furniture — drop this block, keep reading
             mx, bold = _block_meta(b)
             wc = len(txt.split())
             if intable:
