@@ -76,6 +76,12 @@ Machine-owned content lives between markers; **everything else is human-owned an
    per paper: `figs/*.png`, `bundle.json` (figures+full captions+tier), `references.txt`, `text.txt`.
    - Figures use caption-anchored **graphics-union** rendering (raster + vector), nearest-caption
      assignment, validate-before-emit; caption-only when no real graphics (never a fake image).
+   - **Text is cleaned** (`clean.py`), never raw `get_text()`: column-aware reading order (fixes
+     title/authors landing mid-text), smart **de-hyphenation** (keeps real compounds like
+     `single-chain` via a per-doc compound set; merges soft breaks like `algo-rithm`), paragraph
+     reflow, ligature normalization (`ﬁ`→`fi`), and removal of page furniture (running heads,
+     page numbers), figure-internal text (panel labels, axis numbers), and the trailing reference
+     list. References are captured separately in `references.txt`.
 3. **Per paper:**
    a. **Existence check** via MCP (`search_notes` / `get_frontmatter`) by `zotero_key` then `doi`
       across `300-reference/science/` **and** `…/papers/`. If found → **SKIP + report**, don't write.
