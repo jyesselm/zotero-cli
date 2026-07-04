@@ -79,6 +79,10 @@ Machine-owned content lives between markers; **everything else is human-owned an
    per paper: `figs/*.png`, `bundle.json` (figures+full captions+tier), `references.txt`, `text.txt`.
    - Figures use caption-anchored **graphics-union** rendering (raster + vector), nearest-caption
      assignment, validate-before-emit; caption-only when no real graphics (never a fake image).
+   - **Word re-spacing:** some PDFs (e.g. ACS) glue words in PyMuPDF spans ("Networksoftriplehelices").
+     Re-space each paragraph against `pdftotext` (poppler) output, which infers spaces from glyph
+     geometry. Also: use the **authoritative title from Zotero** as the `#` heading (PDF titles split
+     across blocks) and drop ACS/download furniture ("Downloaded via…", "RECEIVED ON…").
    - **Text is cleaned** (`clean.py`), never raw `get_text()`: column-aware reading order (fixes
      title/authors landing mid-text), smart **de-hyphenation** (keeps real compounds like
      `single-chain` via a per-doc compound set; merges soft breaks like `algo-rithm`), paragraph
