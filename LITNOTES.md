@@ -102,10 +102,12 @@ Machine-owned content lives between markers; **everything else is human-owned an
       Zotero annotation highlights as seeds *only if the item has any*).
    c. **Write the main note** with `mcp__obsidian__write_note` — the standard header (§1) as the
       `frontmatter` object and the body (managed regions §3, incl. `cited_section_md`) as `content`.
-4. **MOCs:** `moc-sync` builds `MOC - <tag>` for **method/system/topic/type** tags + a floor
-   `MOC - key-papers` (so every note links ≥1 MOC). Each MOC = a Dataview query
+4. **MOCs:** `zot moc-sync` builds `MOC - <tag>` for every **method/system/topic/type** paper-tag in
+   the corpus (`topic/thermodynamics/*` rolls up to `topic/thermodynamics`) + a floor `MOC - key-papers`
+   (so every note links ≥1 MOC). Each MOC = a Dataview query
    (`TABLE year, journal FROM "300-reference/science" WHERE contains(paper-tags,"<tag>")`) **plus** a
-   marker-fenced static wikilink list. Deny `status/*` (except floor), `cited/*`, `lab/*`, `type/my-paper`.
+   marker-fenced static wikilink list; human text below the fence is preserved. `status/*`, `cited/*`,
+   and `lab/*` get no MOC.
 5. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
    sections intact.
 

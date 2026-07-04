@@ -64,6 +64,9 @@ Portability / files:
   bundle, and a "Cited in your notes" cross-link section). Read-only against Zotero. The executive
   summary (agent) + dashboard-note assembly (Obsidian MCP) are the remaining manual step — see
   `LITNOTES.md`. Inline citation links are best-effort; **spot-check them** (the section is authoritative).
+- `zot moc-sync [-d …/science]` → (re)generate tag MOCs (`MOCs/MOC - <tag>.md`) from the notes'
+  `paper-tags` (method/system/topic/type + a floor `MOC - key-papers`); Dataview query + fenced
+  static list, human text below the fence preserved. Read-only against Zotero.
 
 ---
 

@@ -886,6 +886,34 @@ def litnote(
     )
 
 
+@app.command("moc-sync")
+def moc_sync(
+    science_dir: str = typer.Option(
+        "~/notes/300-reference/science",
+        "--dir",
+        "-d",
+        help="Literature-note folder in the Obsidian vault",
+    ),
+):
+    """(Re)generate tag MOCs (Maps of Content) from the literature notes.
+
+    Builds `MOCs/MOC - <tag>.md` for every method/system/topic/type paper-tag in the
+    corpus (topic/thermodynamics/* rolls up) plus a floor `MOC - key-papers`. Each MOC
+    is a Dataview query + a marker-fenced static wikilink list; human text below the
+    fence is preserved. Read-only against Zotero.
+    """
+    from zotero_cli import litnote as ln
+
+    sdir = Path(science_dir).expanduser()
+    if not sdir.exists():
+        rprint(f"[red]Not found: {sdir}[/red]")
+        raise typer.Exit(1)
+    written = ln.build_mocs(sdir)
+    rprint(f"[green]Wrote {len(written)} MOC(s):[/green]")
+    for m in written:
+        rprint(f"  [[{m}]]")
+
+
 @app.command()
 def suggest(
     item_id: int = typer.Argument(..., help="Item ID to get suggestions for"),
