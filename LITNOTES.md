@@ -30,8 +30,8 @@ Every literature note carries exactly these keys, in this order. Ownership = who
 | `zotero_key` | machine | **stable identity** for re-matching / round-trip | `PAXAQR7U` |
 | `zotero` | machine | deep link | `zotero://select/library/items/PAXAQR7U` |
 | `type` | machine | note class (vault convention) | `literature` |
-| `tags` | machine | **controlled vocabulary** (drives MOCs/Dataview); leaf tags | `[method/dms, topic/…, status/key-paper]` |
-| `science-tags` | human | your existing free tag scheme (preserved) | `[rna, rna-design]` |
+| `tags` | machine | Obsidian-level note tag | `[literature]` |
+| `paper-tags` | machine | **controlled vocabulary** (drives MOCs/Dataview); leaf tags | `[method/dms, topic/…, status/key-paper]` |
 | `status` | **human** | reading state | `unread` \| `reading` \| `read` |
 | `date` | machine (once) | added to vault | `2026-07-04` |
 | `updated` | **human** | last human edit | `2026-07-04` |
@@ -40,14 +40,17 @@ Every literature note carries exactly these keys, in this order. Ownership = who
 | `figures` | machine | figure count (dashboards) | `4` |
 | `has_fulltext` | machine | full-text sibling exists | `true` |
 
-Rules: controlled tags in `tags` are **leaf-only** (`method/dms`, not also `method/chemical-mapping`).
-`status`, `updated`, and `science-tags` are yours; regeneration must preserve them.
+Rules: controlled tags go in **`paper-tags`** (not `tags`) and are **leaf-only** (`method/dms`, not also
+`method/chemical-mapping`). MOCs/Dataview query `paper-tags`. `status` and `updated` are human-owned;
+regeneration must preserve them.
 
 ## 2. Locations & naming (fixed conventions)
 
 - **Note:** `300-reference/science/<slug>.md`
 - **Slug:** `firstauthor-year-shorttitle`, lowercase-hyphen (e.g. `yesselman-2019-computational-3d-rna-design`; matches the vault's `homan-2014-ring-mapper`). Add `-b`,`-c` on collision.
-- **Full text sibling:** `300-reference/science/<slug>.fulltext.md` (machine dump; **linked, not embedded**).
+- **Reading note (full text):** `300-reference/science/<slug>.fulltext.md` — a **paper-like reconstruction**:
+  `#`/`###` section headings (font/bold-detected), **figures embedded inline** at their caption positions,
+  cleaned prose. Linked from the dashboard note (not transcluded). Written to the filesystem (large).
 - **Figures:** `300-reference/science/attachments/<slug>/figN.png`.
 - **MOCs:** `300-reference/science/MOCs/MOC - <tag-slug>.md` (tag `/` → `-`).
 - **Zotero URIs:** `zotero://select/library/items/<KEY>` and `zotero://open-pdf/library/items/<KEY>`
@@ -93,7 +96,7 @@ Machine-owned content lives between markers; **everything else is human-owned an
       `frontmatter` object and the body (with managed regions) as `content`.
 4. **MOCs:** `moc-sync` builds `MOC - <tag>` for **method/system/topic/type** tags + a floor
    `MOC - key-papers` (so every note links ≥1 MOC). Each MOC = a Dataview query
-   (`TABLE year, journal FROM "300-reference/science" WHERE contains(tags,"<tag>")`) **plus** a
+   (`TABLE year, journal FROM "300-reference/science" WHERE contains(paper-tags,"<tag>")`) **plus** a
    marker-fenced static wikilink list. Deny `status/*` (except floor), `cited/*`, `lab/*`, `type/my-paper`.
 5. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
    sections intact.
