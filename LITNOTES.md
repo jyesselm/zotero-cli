@@ -108,6 +108,12 @@ Machine-owned content lives between markers; **everything else is human-owned an
 - Regeneration rewrites **only** inside `zot:auto` fences; preserves `status`/`updated`/`science-tags`
   and all human sections; CREATE-only (SKIP existing notes).
 - Full text is **linked**, not transcluded (bodies run 50k–130k chars).
+- **Extracted text is markdown-escaped** against a fixed register before it's written into a note:
+  escape `* _ \` ~ < > [ ]` and leading `# > | + -`. Without this, stray PDF characters (e.g. the
+  corresponding-author `*`) open unclosed emphasis and corrupt the whole note's rendering. Only the
+  markdown the builder *adds* (headings `##`, bold `**Fig N |**`, embeds `![[…]]`) is left unescaped.
+- **Table cell-text is dropped** (fragment lines after a `Table N` caption) and **figure/axis text**
+  excluded (blocks inside figure regions), so neither leaks into the prose.
 
 ## 6. Reference implementation
 
