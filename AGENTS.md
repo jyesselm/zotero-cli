@@ -59,6 +59,11 @@ Portability / files:
 - `zot mirror [-d ~/local/papers] [--copy] [--clean]` → browsable `Author/Year/Citekey-Title.pdf`
   symlink tree pointing at Zotero storage. **Local only, never syncs** — run on each machine.
 - `zot note <id>` / `zot link <id>` / `zot related <id>` → Obsidian integration.
+- `zot litnote <id> [-d ~/notes/300-reference/science]` → build the **deterministic** pieces of a
+  literature note (figure clips, a cleaned paper-like `<slug>.fulltext.md`, a `<slug>.litnote.json`
+  bundle, and a "Cited in your notes" cross-link section). Read-only against Zotero. The executive
+  summary (agent) + dashboard-note assembly (Obsidian MCP) are the remaining manual step — see
+  `LITNOTES.md`. Inline citation links are best-effort; **spot-check them** (the section is authoritative).
 
 ---
 

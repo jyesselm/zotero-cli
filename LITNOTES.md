@@ -74,30 +74,34 @@ Machine-owned content lives between markers; **everything else is human-owned an
 
 ## 4. Build runbook (repeat this)
 
-1. **Pick the subset.** e.g. `zot search -t status/key-paper` → item IDs + `pdf_path`.
-2. **Extract** (deterministic, read-only): run the extractor (`extract_lit.py`) on the PDFs →
-   per paper: `figs/*.png`, `bundle.json` (figures+full captions+tier), `references.txt`, `text.txt`.
-   - Figures use caption-anchored **graphics-union** rendering (raster + vector), nearest-caption
-     assignment, validate-before-emit; caption-only when no real graphics (never a fake image).
-   - **Word re-spacing:** some PDFs (e.g. ACS) glue words in PyMuPDF spans ("Networksoftriplehelices").
-     Re-space each paragraph against `pdftotext` (poppler) output, which infers spaces from glyph
-     geometry. Also: use the **authoritative title from Zotero** as the `#` heading (PDF titles split
-     across blocks) and drop ACS/download furniture ("Downloaded via…", "RECEIVED ON…").
-   - **Text is cleaned** (`clean.py`), never raw `get_text()`: column-aware reading order (fixes
-     title/authors landing mid-text), smart **de-hyphenation** (keeps real compounds like
-     `single-chain` via a per-doc compound set; merges soft breaks like `algo-rithm`), paragraph
-     reflow, ligature normalization (`ﬁ`→`fi`), and removal of page furniture (running heads,
-     page numbers), figure-internal text (panel labels, axis numbers), and the trailing reference
-     list. References are captured separately in `references.txt`.
-3. **Per paper:**
+1. **Pick the subset.** e.g. `zot search -t status/key-paper` → item IDs.
+2. **Run the deterministic pipeline:** `zot litnote <id>` (module: `zotero_cli.litnote`).
+   Read-only against Zotero. For each paper it writes into `300-reference/science/`:
+   - `attachments/<slug>/figN.png` — caption-anchored **graphics-union** figure clips (raster +
+     vector), nearest-caption assignment, validate-before-emit; **caption-only** when no real
+     graphics (never a fake image / broken embed).
+   - `<slug>.fulltext.md` — the paper-like reading note: `#`/`##`/`###` headings, **inline figures**
+     at caption positions, cleaned + markdown-safe prose. Cleaning (never raw `get_text()`):
+     column-aware reading order, **de-hyphenation** that keeps real compounds (`single-chain`) but
+     merges soft breaks (`algo-rithm`), ligature + math-font normalization (`ﬁ`→`fi`, `ð`→`(`,
+     `¼`→`=`), figure-internal/axis/table-cell text dropped, page furniture removed, and **poppler
+     re-spacing** (fixes ACS-style glued words "Networksoftriplehelices"). The authoritative
+     **title comes from Zotero** (PDF titles split across blocks).
+   - `<slug>.litnote.json` — the bundle the summarizing agent consumes: metadata, per-figure
+     captions (+`has_image`), `paper_tags`, and the ready-to-paste `cited_section_md`.
+   - **Citation cross-links:** references are matched (DOI → author+year → title) against library
+     items that **already have notes**; emits a `## Cited in your notes` section (with ref #s, easy
+     to go back to) and conservatively inline-links citation numbers in prose. Inline linking is
+     **best-effort — spot-check it**; the *section* is authoritative. Front matter (authors/
+     affiliations) and ranges (`7–10`) are never linked (superscripts collide with cite numbers).
+   - Slug is reused if the paper is already noted (re-match by `zotero_key`) — regenerates in place.
+3. **Per paper — assemble the dashboard note (agent + MCP):**
    a. **Existence check** via MCP (`search_notes` / `get_frontmatter`) by `zotero_key` then `doi`
-      across `300-reference/science/` **and** `…/papers/`. If found → **SKIP + report**, don't write.
-   b. **Copy figures** to `attachments/<slug>/` (filesystem `cp`).
-   c. **Write the full-text sibling** `<slug>.fulltext.md`.
-   d. **Agent writes the executive summary** from `bundle.json` (`sections` + captions; use Zotero
-      annotation highlights as seeds *only if the item has any*).
-   e. **Write the main note** with `mcp__obsidian__write_note` — pass the standard header as the
-      `frontmatter` object and the body (with managed regions) as `content`.
+      across `300-reference/science/` **and** `…/papers/`. If found → **SKIP + report**, don't clobber.
+   b. **Agent writes the executive summary** from `<slug>.litnote.json` (captions + fulltext; use
+      Zotero annotation highlights as seeds *only if the item has any*).
+   c. **Write the main note** with `mcp__obsidian__write_note` — the standard header (§1) as the
+      `frontmatter` object and the body (managed regions §3, incl. `cited_section_md`) as `content`.
 4. **MOCs:** `moc-sync` builds `MOC - <tag>` for **method/system/topic/type** tags + a floor
    `MOC - key-papers` (so every note links ≥1 MOC). Each MOC = a Dataview query
    (`TABLE year, journal FROM "300-reference/science" WHERE contains(paper-tags,"<tag>")`) **plus** a

@@ -1,5 +1,6 @@
 """Command-line interface for Zotero."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -776,6 +777,113 @@ def find_related(
     for note_path in related:
         rel_path = note_path.relative_to(vault_path)
         rprint(f"  [[{note_path.stem}]] - {rel_path.parent}")
+
+
+@app.command()
+def litnote(
+    item_id: int = typer.Argument(..., help="Item ID to build a literature note for"),
+    science_dir: str = typer.Option(
+        "~/notes/300-reference/science",
+        "--dir",
+        "-d",
+        help="Literature-note folder in the Obsidian vault",
+    ),
+):
+    """Build the deterministic pieces of an Obsidian literature note from a Zotero PDF.
+
+    Extracts real figure images, a paper-like cleaned reading note, and a
+    'Cited in your notes' cross-link section, then writes:
+
+      <dir>/<slug>.fulltext.md              paper-like reading note (inline figures)
+      <dir>/attachments/<slug>/figN.png     clipped figures
+      <dir>/<slug>.litnote.json             bundle for the summarizing agent
+
+    The executive summary (agent) and dashboard-note assembly (Obsidian MCP) are the
+    remaining manual step — see LITNOTES.md. Read-only against Zotero.
+    """
+    from zotero_cli import litnote as ln
+
+    db = get_db()
+    item = db.get_item(item_id=item_id)
+    if not item:
+        rprint(f"[red]Item {item_id} not found.[/red]")
+        raise typer.Exit(1)
+    if not item.pdf_path or not item.pdf_path.exists():
+        rprint("[red]No PDF found for this item.[/red]")
+        raise typer.Exit(1)
+
+    sdir = Path(science_dir).expanduser()
+    sdir.mkdir(parents=True, exist_ok=True)
+    pdf = str(item.pdf_path)
+
+    # Reuse the existing note's slug if this paper is already noted (re-match by key),
+    # so regeneration updates in place instead of orphaning the original note.
+    key2slug = ln.vault_key2slug(sdir)
+    slug = key2slug.get(item.key) or ln.make_slug(item)
+    reused = item.key in key2slug
+
+    tag = "[yellow](regenerating existing)[/yellow]" if reused else ""
+    rprint(f"[bold]{item.short_title()}[/bold]  →  [cyan]{slug}[/cyan] {tag}")
+
+    # 1. figures + references + cleaned text
+    bundle = ln.extract(pdf, sdir, slug)
+    rprint(
+        f"  figures: {bundle['n_fig_img']}/{bundle['n_fig_total']} clipped · "
+        f"references: {bundle['references_n']} · {bundle['chars']:,} chars"
+    )
+
+    # 2. paper-like reading note
+    fig_by_label = {f["label"]: f for f in bundle["figures"]}
+    body = ln.build_reading_note(pdf, slug, fig_by_label, title=item.title)
+
+    # 3. citation cross-links (only to papers that already have notes)
+    lib = db.search(limit=100000)
+    section, num2slug = ln.cited_notes(bundle["references"], item.key, lib, key2slug)
+    body, n_inline = ln.link_inline(body, num2slug)
+    cited_md = ln.cited_section_md(section, slug)
+
+    # 4. write the deterministic artifacts.
+    # build_reading_note already owns the `# title` H1 (it needs the title for
+    # front-matter dedup); inject the provenance subtitle right after it.
+    subtitle = (
+        f"*Machine-extracted reading note · [[{slug}|dashboard]] · "
+        f"[open in Zotero](zotero://select/library/items/{item.key})*"
+    )
+    head, _, rest = body.partition("\n")
+    ft = sdir / f"{slug}.fulltext.md"
+    ft.write_text(f"{head}\n\n{subtitle}\n{rest.lstrip(chr(10))}\n")
+    (sdir / f"{slug}.litnote.json").write_text(
+        json.dumps(
+            {
+                "slug": slug,
+                "zotero_key": item.key,
+                "title": item.title,
+                "authors": item.authors,
+                "year": item.year,
+                "journal": item.journal,
+                "doi": item.doi,
+                "url": item.url,
+                "citekey": item.citation_key,
+                "paper_tags": [t for t in item.tags if "/" in t],
+                "figures": [
+                    {"label": f["label"], "caption": f["caption"], "has_image": bool(f["image"])}
+                    for f in bundle["figures"]
+                ],
+                "cited_section_md": cited_md,
+                "n_inline_links": n_inline,
+            },
+            indent=1,
+            ensure_ascii=False,
+        )
+    )
+
+    rprint(f"  [green]wrote[/green] {ft.name}  ·  {slug}.litnote.json")
+    if section:
+        rprint(f"  cited-in-notes: {len(section)} paper(s), {n_inline} inline link(s)")
+    rprint(
+        "\n[dim]Next (manual): agent writes the summary from the .litnote.json bundle, "
+        "then assembles the dashboard note via the Obsidian MCP (see LITNOTES.md).[/dim]"
+    )
 
 
 @app.command()
