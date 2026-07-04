@@ -95,13 +95,17 @@ Machine-owned content lives between markers; **everything else is human-owned an
      **best-effort — spot-check it**; the *section* is authoritative. Front matter (authors/
      affiliations) and ranges (`7–10`) are never linked (superscripts collide with cite numbers).
    - Slug is reused if the paper is already noted (re-match by `zotero_key`) — regenerates in place.
-3. **Per paper — assemble the dashboard note (agent + MCP):**
-   a. **Existence check** via MCP (`search_notes` / `get_frontmatter`) by `zotero_key` then `doi`
-      across `300-reference/science/` **and** `…/papers/`. If found → **SKIP + report**, don't clobber.
-   b. **Agent writes the executive summary** from `<slug>.litnote.json` (captions + fulltext; use
-      Zotero annotation highlights as seeds *only if the item has any*).
-   c. **Write the main note** with `mcp__obsidian__write_note` — the standard header (§1) as the
-      `frontmatter` object and the body (managed regions §3, incl. `cited_section_md`) as `content`.
+3. **Per paper — assemble the dashboard note:**
+   a. **Agent writes the executive summary** from `<slug>.litnote.json` (captions + fulltext; use
+      Zotero annotation highlights as seeds *only if the item has any*) to a file.
+   b. **Assemble:** `zot litnote <id> --summary <summary.md>` (or drop the summary at
+      `<dir>/<slug>.summary.md`) writes the dashboard `<dir>/<slug>.md` — standard frontmatter (§1)
+      + managed-region body (§3, incl. figures and `cited_section_md`). **Regeneration is safe**:
+      human sections (`## Notes` onward) and `status`/`updated` are preserved. CREATE-or-update by
+      `zotero_key` (slug reuse), so it never orphans a note. For fanning out many papers, have each
+      agent write `<dir>/<slug>.summary.md`, then run `zot litnote <id>` per paper.
+   c. **Ad-hoc edits** to a single note still go through the Obsidian MCP (`mcp__obsidian__*`); the
+      CLI owns batch (re)generation, the MCP owns interactive tweaks. Both respect the managed fences.
 4. **MOCs:** `zot moc-sync` builds `MOC - <tag>` for every **method/system/topic/type** paper-tag in
    the corpus (`topic/thermodynamics/*` rolls up to `topic/thermodynamics`) + a floor `MOC - key-papers`
    (so every note links ≥1 MOC). Each MOC = a Dataview query

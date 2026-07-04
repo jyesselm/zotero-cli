@@ -788,8 +788,15 @@ def litnote(
         "-d",
         help="Literature-note folder in the Obsidian vault",
     ),
+    summary: str = typer.Option(
+        None,
+        "--summary",
+        "-s",
+        help="Path to the agent-written executive summary (else <dir>/<slug>.summary.md, "
+        "else a placeholder). When present, the dashboard note is assembled too.",
+    ),
 ):
-    """Build the deterministic pieces of an Obsidian literature note from a Zotero PDF.
+    """Build an Obsidian literature note from a Zotero PDF (deterministic + assembly).
 
     Extracts real figure images, a paper-like cleaned reading note, and a
     'Cited in your notes' cross-link section, then writes:
@@ -797,9 +804,12 @@ def litnote(
       <dir>/<slug>.fulltext.md              paper-like reading note (inline figures)
       <dir>/attachments/<slug>/figN.png     clipped figures
       <dir>/<slug>.litnote.json             bundle for the summarizing agent
+      <dir>/<slug>.md                        dashboard note (frontmatter + summary + figures)
 
-    The executive summary (agent) and dashboard-note assembly (Obsidian MCP) are the
-    remaining manual step — see LITNOTES.md. Read-only against Zotero.
+    The executive summary is agent-written: pass it with --summary (or drop it at
+    <dir>/<slug>.summary.md) and the dashboard note is assembled. On regeneration,
+    human sections (## Notes onward) and status/updated are preserved. Read-only
+    against Zotero. See LITNOTES.md.
     """
     from zotero_cli import litnote as ln
 
@@ -880,10 +890,27 @@ def litnote(
     rprint(f"  [green]wrote[/green] {ft.name}  ·  {slug}.litnote.json")
     if section:
         rprint(f"  cited-in-notes: {len(section)} paper(s), {n_inline} inline link(s)")
-    rprint(
-        "\n[dim]Next (manual): agent writes the summary from the .litnote.json bundle, "
-        "then assembles the dashboard note via the Obsidian MCP (see LITNOTES.md).[/dim]"
+
+    # 5. dashboard note — assembled if a summary is available
+    summ_path = Path(summary).expanduser() if summary else (sdir / f"{slug}.summary.md")
+    summ_text = summ_path.read_text().strip() if summ_path.exists() else None
+    dash = sdir / f"{slug}.md"
+    rendered = ln.render_dashboard(
+        slug=slug, key=item.key, title=item.title, authors=item.authors,
+        year=item.year, journal=item.journal, doi=item.doi, url=item.url,
+        paper_tags=[t for t in item.tags if "/" in t], figures=bundle["figures"],
+        summary=summ_text or "*Summary pending — run with `--summary` once written.*",
+        cited_md=cited_md,
     )
+    if dash.exists():
+        rendered = ln.merge_preserving_human(dash.read_text(), rendered)
+    dash.write_text(rendered)
+    if summ_text:
+        rprint(f"  [green]assembled dashboard[/green] {dash.name}  (summary: {summ_path.name})")
+    else:
+        rprint(f"  [yellow]dashboard written with placeholder summary[/yellow] {dash.name}")
+
+    rprint("\n[dim]Run `zot moc-sync` after a batch so MOC links resolve.[/dim]")
 
 
 @app.command("moc-sync")

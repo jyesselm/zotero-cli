@@ -59,11 +59,12 @@ Portability / files:
 - `zot mirror [-d ~/local/papers] [--copy] [--clean]` → browsable `Author/Year/Citekey-Title.pdf`
   symlink tree pointing at Zotero storage. **Local only, never syncs** — run on each machine.
 - `zot note <id>` / `zot link <id>` / `zot related <id>` → Obsidian integration.
-- `zot litnote <id> [-d ~/notes/300-reference/science]` → build the **deterministic** pieces of a
-  literature note (figure clips, a cleaned paper-like `<slug>.fulltext.md`, a `<slug>.litnote.json`
-  bundle, and a "Cited in your notes" cross-link section). Read-only against Zotero. The executive
-  summary (agent) + dashboard-note assembly (Obsidian MCP) are the remaining manual step — see
-  `LITNOTES.md`. Inline citation links are best-effort; **spot-check them** (the section is authoritative).
+- `zot litnote <id> [-d …/science] [-s summary.md]` → build a literature note: figure clips, a
+  cleaned paper-like `<slug>.fulltext.md`, a `<slug>.litnote.json` bundle, a "Cited in your notes"
+  cross-link section, and (when a summary is supplied via `-s` or `<dir>/<slug>.summary.md`) the
+  assembled dashboard `<slug>.md`. Regeneration preserves human sections (`## Notes` onward) and
+  `status`/`updated`. Read-only against Zotero. The executive **summary is agent-written**. Inline
+  citation links are best-effort; **spot-check them** (the section is authoritative). See `LITNOTES.md`.
 - `zot moc-sync [-d …/science]` → (re)generate tag MOCs (`MOCs/MOC - <tag>.md`) from the notes'
   `paper-tags` (method/system/topic/type + a floor `MOC - key-papers`); Dataview query + fenced
   static list, human text below the fence preserved. Read-only against Zotero.

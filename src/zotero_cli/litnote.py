@@ -675,6 +675,134 @@ def link_inline(body: str, num2slug: dict):
 # --------------------------------------------------------------------------- #
 # orchestration helpers
 # --------------------------------------------------------------------------- #
+def dashboard_mocs(paper_tags) -> list[str]:
+    """MOC slugs a note links: one per method/system/topic/type tag + key-papers floor."""
+    out, seen = [], set()
+    for t in paper_tags:
+        mt = _moc_tag(t)
+        if mt:
+            slug = "MOC - " + mt.replace("/", "-")
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+    if any(t == "status/key-paper" for t in paper_tags) and "MOC - key-papers" not in seen:
+        out.append("MOC - key-papers")
+    return out
+
+
+def _yaml_scalar(v) -> str:
+    s = str(v)
+    if s == "" or re.search(r"[:#\[\]{}&*!|>'\"%@`]", s) or s != s.strip():
+        return "'" + s.replace("'", "''") + "'"
+    return s
+
+
+def render_dashboard(
+    *, slug, key, title, authors, year, journal, doi, url, paper_tags,
+    figures, summary, cited_md, status="unread", date="2026-07-04", updated="2026-07-04",
+) -> str:
+    """Render a complete dashboard note (YAML frontmatter + managed-region body).
+
+    `figures` is the bundle's figure list ({label, caption, image}). `summary` is the
+    agent-written executive summary; `cited_md` the 'Cited in your notes' region ('' if none).
+    """
+    n_img = sum(1 for f in figures if f.get("image"))
+    fm = [
+        ("title", title), ("year", year), ("journal", journal), ("doi", doi),
+        ("url", url), ("citekey", f"{(authors[0].split()[-1] if authors else '')}{year}"),
+        ("zotero_key", key), ("zotero", f"zotero://select/library/items/{key}"),
+        ("type", "literature"),
+    ]
+    lines = ["---"]
+    for k, v in fm:
+        lines.append(f"{k}: {_yaml_scalar(v)}")
+    lines.append("authors:")
+    for a in authors:
+        lines.append(f"  - {_yaml_scalar(a)}")
+    lines.append("tags:")
+    lines.append("  - literature")
+    lines.append("paper-tags:")
+    for t in paper_tags:
+        lines.append(f"  - {t}")
+    for k, v in [("status", status), ("date", date), ("updated", updated),
+                 ("zot_built", "2026-07-04"), ("zot_pipeline", 5),
+                 ("figures", n_img), ("has_fulltext", "true")]:
+        lines.append(f"{k}: {_yaml_scalar(v)}")
+    lines.append("---")
+
+    first = authors[0].split()[-1] if authors else ""
+    last = authors[-1].split()[-1] if len(authors) > 1 else ""
+    byline = f"{first}, … {last}" if last and last != first else first
+    doi_link = f" · [{doi}](https://doi.org/{doi})" if doi else ""
+    mocs = dashboard_mocs(paper_tags)
+
+    b = lines
+    b.append(f"# {title}\n")
+    b.append(f"**{byline}** · {year} · *{journal}*{doi_link}\n")
+    b.append("## Links")
+    b.append(f"- **Zotero:** [open in Zotero](zotero://select/library/items/{key})")
+    b.append(f"- **PDF:** [open PDF](zotero://open-pdf/library/items/{key})")
+    b.append(f"- **Full extracted text:** [[{slug}.fulltext|read full text]]\n")
+    b.append("<!-- zot:auto:start:moc -->")
+    b.append("## MOCs")
+    b.append(" · ".join(f"[[{m}]]" for m in mocs) if mocs else "*(no MOC tags)*")
+    b.append("<!-- zot:auto:end:moc -->\n")
+    b.append("## Summary")
+    b.append("<!-- zot:auto:start:summary -->")
+    b.append(summary.strip())
+    b.append("<!-- zot:auto:end:summary -->\n")
+    if cited_md:
+        b.append(cited_md + "\n")
+    b.append("<!-- zot:auto:start:figures -->")
+    b.append("## Figures\n")
+    for f in figures:
+        if not f.get("image"):
+            continue
+        num = re.sub(r"\D", "", f["label"])
+        cap = md_escape(f["caption"].strip())
+        b.append(f"### Figure {num}")
+        b.append(f"![[attachments/{slug}/{f['label']}.png]]")
+        if " | " in cap:
+            a, b2 = cap.split(" | ", 1)
+            b.append(f"> **{a} |** {b2}\n")
+        else:
+            b.append(f"> {cap}\n")
+    caponly = [f["label"] for f in figures if not f.get("image")]
+    if caponly:
+        b.append(f"*Caption-only (no extractable graphics): {', '.join(caponly)} — see the "
+                 f"[open PDF](zotero://open-pdf/library/items/{key}).*\n")
+    b.append("<!-- zot:auto:end:figures -->\n")
+    b.append("<!-- zot:auto:start:text -->")
+    b.append("## Extracted text")
+    b.append("The complete machine-extracted body is in the sibling note:\n")
+    b.append(f"→ [[{slug}.fulltext|Full extracted text]]")
+    b.append("<!-- zot:auto:end:text -->\n")
+    b.append("## Notes")
+    b.append("*Your notes live here and below — never touched when this note is regenerated.*\n")
+    b.append("## Key Points")
+    b.append("- \n")
+    b.append("## Questions")
+    b.append("- ")
+    return "\n".join(b) + "\n"
+
+
+def merge_preserving_human(old: str, fresh: str) -> str:
+    """Regeneration: keep human-owned frontmatter (status/updated) and everything from
+    the first human section (## Notes) onward from `old`; take the rest from `fresh`."""
+    # human body tail
+    marker = "\n## Notes"
+    fresh_head = fresh.split(marker, 1)[0]
+    old_tail = old.split(marker, 1)
+    tail = marker + old_tail[1] if len(old_tail) == 2 else fresh[len(fresh_head):]
+    merged = fresh_head + tail
+    # preserve human frontmatter values
+    for keyname in ("status", "updated"):
+        m = re.search(rf"(?m)^{keyname}:\s*(.*)$", old)
+        if m:
+            merged = re.sub(rf"(?m)^{keyname}:\s*.*$", f"{keyname}: {m.group(1).strip()}", merged, count=1)
+    return merged
+
+
 def _read_frontmatter(path: Path) -> dict:
     """Minimal YAML-ish frontmatter reader (title, year, journal, paper-tags list)."""
     txt = path.read_text()
