@@ -333,6 +333,54 @@ def retag(
         rprint(f"[yellow]Tag '{old_tag}' not found.[/yellow]")
 
 
+def _ensure_zotero_closed() -> None:
+    """Refuse to write while Zotero is open (avoids a locked/corrupt DB)."""
+    if subprocess.run(["pgrep", "-fi", "zotero"], capture_output=True).returncode == 0:
+        rprint("[red]Zotero is running — quit it fully (⌘Q) first, then retry.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("new-collection")
+def new_collection(
+    name: str = typer.Argument(..., help="Collection name"),
+    parent: str = typer.Option(None, "--parent", "-p", help="Parent collection name"),
+):
+    """Create a new collection (optionally under a parent). Zotero must be closed."""
+    _ensure_zotero_closed()
+    db = get_db()
+    parent_id = None
+    if parent:
+        parent_id = db.find_collection(parent)
+        if parent_id is None:
+            rprint(f"[red]Parent collection '{parent}' not found.[/red]")
+            raise typer.Exit(1)
+    cid = db.create_collection(name, parent_id)
+    where = f" under '{parent}'" if parent else " at the root"
+    rprint(f"[green]Created collection '{name}'[/green] (id {cid}){where}")
+    rprint("[dim]Reopen Zotero to sync it.[/dim]")
+
+
+@app.command("new-project")
+def new_project(
+    name: str = typer.Argument(..., help="Project name (e.g. 2025-atp-ttr-switch)"),
+):
+    """Create a project collection under Projects/ plus a colored cited/<name> tag.
+
+    Zotero must be closed.
+    """
+    _ensure_zotero_closed()
+    db = get_db()
+    parent_id = db.find_collection("Projects")
+    if parent_id is None:
+        rprint("[yellow]No 'Projects' collection found — creating at the root.[/yellow]")
+    cid = db.create_collection(name, parent_id)
+    tag = f"cited/{name}"
+    db.create_colored_tag(tag)
+    rprint(f"[green]Created project '{name}'[/green] (id {cid}) + colored tag [cyan]{tag}[/cyan]")
+    rprint("[dim]Reopen Zotero to sync. Tag the papers you cite with[/dim] "
+           f"[cyan]{tag}[/cyan][dim].[/dim]")
+
+
 @app.command("tags-export")
 def tags_export(
     out: str = typer.Option(

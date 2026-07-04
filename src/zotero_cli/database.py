@@ -1,5 +1,6 @@
 """Database access layer for Zotero SQLite database."""
 
+import json
 import random
 import re
 import shutil
@@ -451,6 +452,63 @@ class ZoteroDatabase:
                 (row["tagID"] if row else old_tag_id,),
             )
             return cursor.fetchone()["count"]
+
+    def find_collection(self, name: str) -> int | None:
+        """Return the collectionID of a collection by exact name, or None."""
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT collectionID FROM collections WHERE collectionName = ?", (name,)
+            ).fetchone()
+            return row["collectionID"] if row else None
+
+    def create_collection(self, name: str, parent_id: int | None = None) -> int:
+        """Create a collection (optionally under parent_id). Returns its ID.
+
+        Writes directly to the live DB, so Zotero must be closed. New object is
+        marked version=0/synced=0 so Zotero uploads it on next sync.
+        """
+        with self.write_connection() as conn:
+            lib = conn.execute("SELECT libraryID FROM collections LIMIT 1").fetchone()
+            library_id = lib["libraryID"] if lib else 1
+            key = _generate_key()
+            while conn.execute("SELECT 1 FROM collections WHERE key = ?", (key,)).fetchone():
+                key = _generate_key()
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur = conn.execute(
+                "INSERT INTO collections "
+                "(collectionName, parentCollectionID, clientDateModified, libraryID, key, version, synced) "
+                "VALUES (?, ?, ?, ?, ?, 0, 0)",
+                (name, parent_id, now, library_id, key),
+            )
+            return cur.lastrowid
+
+    def create_colored_tag(self, name: str, color: str = "#e6550d") -> None:
+        """Create a tag and give it a color so Zotero won't purge it while unused.
+
+        Colored tags stay visible in the tag selector even with zero items, which
+        is what makes a brand-new project/citation tag persist.
+        """
+        with self.write_connection() as conn:
+            if not conn.execute("SELECT 1 FROM tags WHERE name = ?", (name,)).fetchone():
+                conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+            row = conn.execute(
+                "SELECT value FROM syncedSettings WHERE setting='tagColors' AND libraryID=1"
+            ).fetchone()
+            colors = json.loads(row["value"]) if row else []
+            if not any(c.get("name") == name for c in colors):
+                colors.append({"name": name, "color": color})
+            val = json.dumps(colors)
+            if row:
+                conn.execute(
+                    "UPDATE syncedSettings SET value=?, synced=0 WHERE setting='tagColors' AND libraryID=1",
+                    (val,),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO syncedSettings (setting, libraryID, value, version, synced) "
+                    "VALUES ('tagColors', 1, ?, 0, 0)",
+                    (val,),
+                )
 
     def delete_tag(self, name: str) -> int:
         """Delete a tag entirely, removing it from all items.
