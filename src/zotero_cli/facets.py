@@ -189,10 +189,11 @@ def ground_norm(s: str) -> str:
 
 def resolve(specific: str, hint: str | None) -> str | None:
     """Map a raw specific ('DMS-MaPseq (in-cell)') to a canonical facet slug, or
-    None (holding pen). Alias substring match (longest-first), then a valid hint."""
+    None (holding pen). Alias match (longest-first, on word boundaries so short keys
+    like 'itc'/'tar' don't hit inside 'switching'/'target'), then a valid hint."""
     n = ground_norm(specific)
     for key in _ALIAS_KEYS:
-        if key in n:
+        if re.search(r"(?<![a-z0-9])" + re.escape(key) + r"(?![a-z0-9])", n):
             return FACET_ALIASES[key]
     if hint and hint in FACET_VOCAB:
         return hint
