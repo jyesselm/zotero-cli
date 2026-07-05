@@ -862,6 +862,8 @@ def litnote(
     head, _, rest = body.partition("\n")
     ft = sdir / f"{slug}.fulltext.md"
     ft.write_text(f"{head}\n\n{subtitle}\n{rest.lstrip(chr(10))}\n")
+    # persist references so `zot relink` can recompute cross-links without re-extracting
+    (sdir / f"{slug}.references.txt").write_text(bundle["references"])
     (sdir / f"{slug}.litnote.json").write_text(
         json.dumps(
             {
@@ -911,6 +913,77 @@ def litnote(
         rprint(f"  [yellow]dashboard written with placeholder summary[/yellow] {dash.name}")
 
     rprint("\n[dim]Run `zot moc-sync` after a batch so MOC links resolve.[/dim]")
+
+
+@app.command()
+def relink(
+    science_dir: str = typer.Option(
+        "~/notes/300-reference/science",
+        "--dir",
+        "-d",
+        help="Literature-note folder in the Obsidian vault",
+    ),
+):
+    """Recompute every note's cross-links against the WHOLE current vault.
+
+    As you add notes, older notes' 'Cited in your notes' sections go stale (they were
+    computed when fewer notes existed). This re-derives each note's cited-in-notes
+    section and its MOC links from the current set and rewrites just those managed
+    regions (human sections untouched). Reference lists are cached to
+    `<slug>.references.txt`; the first run extracts them from the PDFs (read-only).
+    Run `zot moc-sync` afterwards to refresh the MOC files themselves.
+    """
+    from zotero_cli import litnote as ln
+
+    sdir = Path(science_dir).expanduser()
+    key2slug = ln.vault_key2slug(sdir)
+    slug2key = {v: k for k, v in key2slug.items()}
+    db = get_db()
+    lib = db.search(limit=100000)
+
+    changed = 0
+    total_links = 0
+    extracted = 0
+    for note in sorted(sdir.glob("*.md")):
+        if note.name.endswith(".fulltext.md") or note.stem.startswith("MOC - "):
+            continue
+        slug = note.stem
+        key = slug2key.get(slug)
+        if not key:
+            continue
+        item = db.get_item(key=key)
+        if not item:
+            continue
+
+        # references: cached sidecar, else extract from the PDF and cache
+        refpath = sdir / f"{slug}.references.txt"
+        if refpath.exists():
+            refs = refpath.read_text()
+        elif item.pdf_path and item.pdf_path.exists():
+            refs, _ = ln.extract_references(str(item.pdf_path))
+            refpath.write_text(refs)
+            extracted += 1
+        else:
+            refs = ""
+
+        section, _num = ln.cited_notes(refs, key, lib, key2slug)
+        cited_md = ln.cited_section_md(section, slug)
+        paper_tags = [t for t in item.tags if "/" in t]
+
+        text = note.read_text()
+        new = ln.set_region(text, "moc", ln.moc_region_md(paper_tags),
+                            after="## Links", before="## Summary")
+        new = ln.set_cited_region(new, cited_md)
+        if new != text:
+            note.write_text(new)
+            changed += 1
+        total_links += len(section)
+
+    rprint(
+        f"[green]relink:[/green] {changed} note(s) updated · {total_links} cross-links "
+        f"across the vault · {extracted} reference list(s) newly extracted"
+    )
+    rprint("[dim]Run `zot moc-sync` to refresh the MOC files.[/dim]")
 
 
 @app.command("moc-sync")

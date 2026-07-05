@@ -297,6 +297,40 @@ def clean_text(path: str) -> str:
     return "\n\n".join(paras)
 
 
+def extract_references(path: str) -> tuple[str, int]:
+    """Return (references_text, n_refs) for a PDF — the trailing reference list.
+
+    Cheap (text only, no figure clipping): used by `zot relink` to recompute
+    cross-links against the current vault without a full rebuild.
+    """
+    doc = fitz.open(path)
+    text = "\n".join(page.get_text() for page in doc)
+    doc.close()
+    refs = ""
+    mh = None
+    for m in REFHEAD.finditer(text):
+        mh = m  # last match = real refs section
+    if mh:
+        refs = text[mh.end() :]
+    if len(refs) < 2000:  # headingless -> numbered-list fallback
+        m1 = re.search(r"(?m)^\s*[\(\[]?1[\)\].]\s+[A-Z]", text)
+        if (
+            m1
+            and re.search(r"(?m)^\s*[\(\[]?2[\)\].]\s", text[m1.start() : m1.start() + 5000])
+            and re.search(r"(?m)^\s*[\(\[]?3[\)\].]\s", text[m1.start() : m1.start() + 8000])
+        ):
+            cand = text[m1.start() :]
+            if len(cand) > len(refs):
+                refs = cand
+    if refs:
+        refs = re.split(
+            r"(?im)^\s*(acknowledg|author contributions|supplementary|competing interest|extended data)",
+            refs,
+        )[0]
+    ref_n = len(re.findall(r"(?m)^\s*[\(\[]?\d+[\)\].]?\s+[A-Z]", refs)) if refs else 0
+    return refs, ref_n
+
+
 def extract(path: str, out_dir: Path, slug: str) -> dict:
     """Clip figures, capture captions + references, write cleaned text. Returns bundle.
 
@@ -353,29 +387,8 @@ def extract(path: str, out_dir: Path, slug: str) -> dict:
             figures.append(rec)
 
     text = "\n".join(full)
-    refs = ""
-    mh = None
-    for m in REFHEAD.finditer(text):
-        mh = m  # last match = real refs section
-    if mh:
-        refs = text[mh.end() :]
-    if len(refs) < 2000:  # headingless -> numbered-list fallback
-        m1 = re.search(r"(?m)^\s*[\(\[]?1[\)\].]\s+[A-Z]", text)
-        if (
-            m1
-            and re.search(r"(?m)^\s*[\(\[]?2[\)\].]\s", text[m1.start() : m1.start() + 5000])
-            and re.search(r"(?m)^\s*[\(\[]?3[\)\].]\s", text[m1.start() : m1.start() + 8000])
-        ):
-            cand = text[m1.start() :]
-            if len(cand) > len(refs):
-                refs = cand
-    if refs:
-        refs = re.split(
-            r"(?im)^\s*(acknowledg|author contributions|supplementary|competing interest|extended data)",
-            refs,
-        )[0]
-    ref_n = len(re.findall(r"(?m)^\s*[\(\[]?\d+[\)\].]?\s+[A-Z]", refs)) if refs else 0
     doc.close()
+    refs, ref_n = extract_references(path)
 
     bundle = {
         "slug": slug,
@@ -622,6 +635,36 @@ def cited_section_md(section, self_slug: str) -> str:
     return "\n".join(lines)
 
 
+def set_cited_region(note_text: str, cited_md: str) -> str:
+    """Insert/replace/remove the zot:auto:cited managed region in a dashboard note.
+
+    - region present + cited_md non-empty -> replace it
+    - region present + cited_md empty      -> remove it
+    - region absent  + cited_md non-empty  -> insert right after the summary region
+      (or, failing that, before the figures region)
+    Everything else in the note is untouched.
+    """
+    start, end = "<!-- zot:auto:start:cited -->", "<!-- zot:auto:end:cited -->"
+    if start in note_text and end in note_text:
+        pre = note_text[: note_text.index(start)]
+        post = note_text[note_text.index(end) + len(end) :]
+        if not cited_md:
+            # drop region and one trailing blank line
+            return pre.rstrip("\n") + "\n\n" + post.lstrip("\n")
+        return pre + cited_md + post
+    if not cited_md:
+        return note_text
+    anchor = "<!-- zot:auto:end:summary -->"
+    if anchor in note_text:
+        i = note_text.index(anchor) + len(anchor)
+        return note_text[:i] + "\n\n" + cited_md + note_text[i:]
+    anchor = "<!-- zot:auto:start:figures -->"
+    if anchor in note_text:
+        i = note_text.index(anchor)
+        return note_text[:i] + cited_md + "\n\n" + note_text[i:]
+    return note_text  # no anchors — leave untouched
+
+
 _AFFIL = re.compile(
     r"(Department|University|Institute|Laborator|e-mail|@|School of|Center for|"
     r"Howard Hughes|Correspond)"
@@ -676,10 +719,13 @@ def link_inline(body: str, num2slug: dict):
 # orchestration helpers
 # --------------------------------------------------------------------------- #
 def dashboard_mocs(paper_tags) -> list[str]:
-    """MOC slugs a note links: one per method/system/topic/type tag + key-papers floor."""
+    """MOC slugs a note links: one per method/system/topic/type tag, one per
+    cited/<project> ('papers to write'), + a key-papers floor."""
     out, seen = [], set()
     for t in paper_tags:
         mt = _moc_tag(t)
+        if not mt and t.startswith("cited/"):
+            mt = t  # group by the manuscript that cites this paper
         if mt:
             slug = "MOC - " + mt.replace("/", "-")
             if slug not in seen:
@@ -688,6 +734,31 @@ def dashboard_mocs(paper_tags) -> list[str]:
     if any(t == "status/key-paper" for t in paper_tags) and "MOC - key-papers" not in seen:
         out.append("MOC - key-papers")
     return out
+
+
+def moc_region_md(paper_tags) -> str:
+    """Render the zot:auto:moc managed region body."""
+    mocs = dashboard_mocs(paper_tags)
+    links = " · ".join(f"[[{m}]]" for m in mocs) if mocs else "*(no MOC tags)*"
+    return f"<!-- zot:auto:start:moc -->\n## MOCs\n{links}\n<!-- zot:auto:end:moc -->"
+
+
+def set_region(note_text: str, name: str, body: str, after: str = None, before: str = None) -> str:
+    """Insert/replace/remove a zot:auto:<name> managed region (see set_cited_region)."""
+    start, end = f"<!-- zot:auto:start:{name} -->", f"<!-- zot:auto:end:{name} -->"
+    if start in note_text and end in note_text:
+        pre = note_text[: note_text.index(start)]
+        post = note_text[note_text.index(end) + len(end) :]
+        return (pre.rstrip("\n") + "\n\n" + post.lstrip("\n")) if not body else (pre + body + post)
+    if not body:
+        return note_text
+    if after and after in note_text:
+        i = note_text.index(after) + len(after)
+        return note_text[:i] + "\n\n" + body + note_text[i:]
+    if before and before in note_text:
+        i = note_text.index(before)
+        return note_text[:i] + body + "\n\n" + note_text[i:]
+    return note_text
 
 
 def _yaml_scalar(v) -> str:
@@ -868,12 +939,15 @@ def build_mocs(science_dir: Path) -> list[str]:
             }
         )
 
-    # bucket notes by MOC tag (+ floor)
+    # bucket notes by MOC tag (+ floor). method/system/topic/type AND cited/<project>
+    # (the latter = "papers cited in a manuscript you're writing").
     buckets: dict[str, list] = {}
     for n in notes:
         seen = set()
         for t in n["tags"]:
             mt = _moc_tag(t)
+            if not mt and t.startswith("cited/"):
+                mt = t
             if mt and mt not in seen:
                 seen.add(mt)
                 buckets.setdefault(mt, []).append(n)
@@ -886,6 +960,10 @@ def build_mocs(science_dir: Path) -> list[str]:
     for tag, members in sorted(buckets.items()):
         if tag == "__key-papers__":
             slug, heading, where = "MOC - key-papers", "Key papers", 'contains(paper-tags, "status/key-paper")'
+        elif tag.startswith("cited/"):
+            slug = "MOC - " + tag.replace("/", "-")
+            heading = f"Papers cited in — {tag.split('/', 1)[1]}"
+            where = f'contains(paper-tags, "{tag}")'
         else:
             slug = "MOC - " + tag.replace("/", "-")
             heading = tag
