@@ -106,13 +106,17 @@ Machine-owned content lives between markers; **everything else is human-owned an
       agent write `<dir>/<slug>.summary.md`, then run `zot litnote <id>` per paper.
    c. **Ad-hoc edits** to a single note still go through the Obsidian MCP (`mcp__obsidian__*`); the
       CLI owns batch (re)generation, the MCP owns interactive tweaks. Both respect the managed fences.
-4. **MOCs:** `zot moc-sync` builds `MOC - <tag>` for every **method/system/topic/type** paper-tag in
-   the corpus (`topic/thermodynamics/*` rolls up to `topic/thermodynamics`) + a floor `MOC - key-papers`
-   (so every note links ≥1 MOC). Each MOC = a Dataview query
-   (`TABLE year, journal FROM "300-reference/science" WHERE contains(paper-tags,"<tag>")`) **plus** a
-   marker-fenced static wikilink list; human text below the fence is preserved. `status/*`, `cited/*`,
-   and `lab/*` get no MOC.
-5. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
+4. **Relink (after every batch):** `zot relink` recomputes **every** note's `Cited in your notes`
+   section and MOC links against the *whole current vault* — older notes were linked when fewer
+   notes existed, so new siblings they cite only get linked on a re-run. It rewrites only those two
+   managed regions (human sections untouched) and caches each reference list to
+   `<slug>.references.txt` (first run extracts from the PDFs; read-only).
+5. **MOCs:** `zot moc-sync` builds `MOC - <tag>` for every **method/system/topic/type** paper-tag +
+   every **`cited/<project>`** ("papers cited in a manuscript you're writing") + a floor
+   `MOC - key-papers`. `topic/thermodynamics/*` rolls up. Each MOC = a Dataview query **plus** a
+   marker-fenced static wikilink list; human text below the fence is preserved. `status/*` (except the
+   floor) and `lab/*` get no MOC.
+6. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
    sections intact.
 
 ## 5. Invariants (do not violate)

@@ -65,9 +65,12 @@ Portability / files:
   assembled dashboard `<slug>.md`. Regeneration preserves human sections (`## Notes` onward) and
   `status`/`updated`. Read-only against Zotero. The executive **summary is agent-written**. Inline
   citation links are best-effort; **spot-check them** (the section is authoritative). See `LITNOTES.md`.
-- `zot moc-sync [-d …/science]` → (re)generate tag MOCs (`MOCs/MOC - <tag>.md`) from the notes'
-  `paper-tags` (method/system/topic/type + a floor `MOC - key-papers`); Dataview query + fenced
-  static list, human text below the fence preserved. Read-only against Zotero.
+- `zot relink [-d …/science]` → recompute **every** note's `Cited in your notes` section + MOC links
+  against the whole current vault (older notes get linked to newer siblings they cite). Rewrites only
+  those managed regions; caches reference lists to `<slug>.references.txt`. Run after each note batch.
+- `zot moc-sync [-d …/science]` → (re)generate MOCs (`MOCs/MOC - <tag>.md`) from the notes'
+  `paper-tags`: method/system/topic/type + **`cited/<project>`** (papers-per-manuscript) + a floor
+  `MOC - key-papers`; Dataview query + fenced static list, human text below the fence preserved.
 
 ---
 
