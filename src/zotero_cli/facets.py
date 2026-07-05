@@ -49,6 +49,8 @@ FACET_METHODS = {
     # computational
     "method/comput", "method/md", "method/ml", "method/structure-prediction",
     "method/rosetta-farfar", "method/docking", "method/qm",
+    # genetics / functional readouts (promoted from the holding pen)
+    "method/mutagenesis", "method/reporter-assay", "method/northern-blot",
 }
 FACET_SYSTEMS = {
     # tertiary motifs / small elements
@@ -128,6 +130,14 @@ FACET_ALIASES: dict[str, str] = {
     "molecular docking": "method/docking",
     "quantum mechanic": "method/qm", "dft": "method/qm", "ab initio": "method/qm",
     "computational": "method/comput",
+    "site-directed mutagenesis": "method/mutagenesis", "point mutation": "method/mutagenesis",
+    "base substitution": "method/mutagenesis", "mutagenesis": "method/mutagenesis",
+    "b-galactosidase": "method/reporter-assay", "b galactosidase": "method/reporter-assay",
+    "beta-galactosidase": "method/reporter-assay", "green fluorescent protein": "method/reporter-assay",
+    "gfp fluorescence": "method/reporter-assay", "luciferase": "method/reporter-assay",
+    "reporter gene": "method/reporter-assay", "reporter assay": "method/reporter-assay",
+    "northern blot": "method/northern-blot", "northern analysis": "method/northern-blot",
+    # NOTE: "in vitro transcription" deliberately NOT promoted (routine prep; per user).
     # systems
     "tetraloop-receptor": "system/ttr", "tetraloop receptor": "system/ttr",
     "gaaa tetraloop": "system/ttr", "tetraloop/receptor": "system/ttr", "ttr": "system/ttr",
