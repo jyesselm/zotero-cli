@@ -116,7 +116,19 @@ Machine-owned content lives between markers; **everything else is human-owned an
    `MOC - key-papers`. `topic/thermodynamics/*` rolls up. Each MOC = a Dataview query **plus** a
    marker-fenced static wikilink list; human text below the fence is preserved. `status/*` (except the
    floor) and `lab/*` get no MOC.
-6. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
+6. **Facets — Methods used + Systems studied (optional, richer than the coarse tags):**
+   the `facet-extractor` agent (`.claude/agents/facet-extractor.md`) reads `<slug>.fulltext.md`
+   + `<slug>.litnote.json` and writes a grounded `<slug>.facets.json` sidecar (rich `specific`s +
+   a `facet_hint`; every item must be present in the text or it's dropped). `zot facets <id>` then
+   VERIFIES each specific against the fulltext (term-level, escape/respacing-tolerant), NORMALIZES it
+   to a canonical slug from the **closed `FACET_VOCAB`** (`src/zotero_cli/facets.py`; unmatched →
+   holding pen, kept in the body but out of frontmatter), and renders a `zot:auto:facets` body region
+   (rich display) + `methods_used`/`systems_used` frontmatter arrays. The sidecar is the single source
+   of truth — `zot litnote` and `zot relink` both re-render facets from it, so they survive rebuilds.
+   `zot moc-sync` emits `MOC - methods-index`/`systems-index` (Dataview `FLATTEN … GROUP BY`) grouping
+   the corpus by facet. `zot facets-review` lists the holding pen; humans promote recurring terms into
+   `FACET_VOCAB`/`FACET_ALIASES` (agents propose, only humans promote → no vocabulary sprawl).
+7. **Verify** in Obsidian: figures render, captions present, MOC + Zotero links resolve, human
    sections intact.
 
 ## 5. Invariants (do not violate)

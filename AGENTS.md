@@ -70,7 +70,14 @@ Portability / files:
   those managed regions; caches reference lists to `<slug>.references.txt`. Run after each note batch.
 - `zot moc-sync [-d …/science]` → (re)generate MOCs (`MOCs/MOC - <tag>.md`) from the notes'
   `paper-tags`: method/system/topic/type + **`cited/<project>`** (papers-per-manuscript) + a floor
-  `MOC - key-papers`; Dataview query + fenced static list, human text below the fence preserved.
+  `MOC - key-papers`; also `MOC - methods-index`/`systems-index` (Dataview `FLATTEN … GROUP BY` over
+  the facet arrays). Dataview query + fenced static list, human text below the fence preserved.
+- `zot facets <id> [-j sidecar] [--verify-only]` → apply agent-extracted **Methods used + Systems
+  studied** facets to a note: verify each grounded in `<slug>.fulltext.md`, normalize to closed
+  `FACET_VOCAB` (unmatched → holding pen), render a `zot:auto:facets` body region + `methods_used`/
+  `systems_used` frontmatter. Sidecar (`<slug>.facets.json`, written by the `facet-extractor` agent)
+  is the source of truth — `litnote`/`relink` re-render from it. `zot facets-review` → holding-pen
+  report (promote recurring terms into `facets.py`; agents propose, humans promote → no sprawl).
 
 ---
 

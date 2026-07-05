@@ -912,6 +912,18 @@ def litnote(
     else:
         rprint(f"  [yellow]dashboard written with placeholder summary[/yellow] {dash.name}")
 
+    # 6. facets (methods/systems) — re-rendered from the sidecar every build so they
+    # survive rebuild (the sidecar is the single source of truth).
+    fac_path = sdir / f"{slug}.facets.json"
+    if fac_path.exists():
+        from zotero_cli import facets as facmod
+
+        resolved = facmod.process(json.loads(fac_path.read_text()), ft.read_text())
+        dash.write_text(facmod.apply_facets(dash.read_text(), resolved))
+        extra = f", {len(resolved['unresolved'])} unresolved" if resolved["unresolved"] else ""
+        rprint(f"  [green]facets[/green]: {len(resolved['methods_used'])} method(s), "
+               f"{len(resolved['systems_used'])} system(s){extra}")
+
     rprint("\n[dim]Run `zot moc-sync` after a batch so MOC links resolve.[/dim]")
 
 
@@ -974,6 +986,15 @@ def relink(
         new = ln.set_region(text, "moc", ln.moc_region_md(paper_tags),
                             after="## Links", before="## Summary")
         new = ln.set_cited_region(new, cited_md)
+        # facets: re-render from the sidecar so body region + frontmatter stay in
+        # sync corpus-wide (same source of truth as `zot litnote`).
+        fac_path = sdir / f"{slug}.facets.json"
+        ftpath = sdir / f"{slug}.fulltext.md"
+        if fac_path.exists() and ftpath.exists():
+            from zotero_cli import facets as facmod
+
+            resolved = facmod.process(json.loads(fac_path.read_text()), ftpath.read_text())
+            new = facmod.apply_facets(new, resolved)
         if new != text:
             note.write_text(new)
             changed += 1
@@ -984,6 +1005,86 @@ def relink(
         f"across the vault · {extracted} reference list(s) newly extracted"
     )
     rprint("[dim]Run `zot moc-sync` to refresh the MOC files.[/dim]")
+
+
+@app.command()
+def facets(
+    item_id: int = typer.Argument(..., help="Item ID whose note to (re)apply facets to"),
+    json_path: str = typer.Option(None, "--json", "-j", help="Facets sidecar (else <dir>/<slug>.facets.json)"),
+    science_dir: str = typer.Option("~/notes/300-reference/science", "--dir", "-d"),
+    verify_only: bool = typer.Option(False, "--verify-only", help="Report grounding, write nothing"),
+):
+    """Apply agent-extracted Methods/Systems facets to a literature note.
+
+    Reads a `<slug>.facets.json` sidecar (produced by the facet-extractor agent),
+    VERIFIES each specific is grounded in `<slug>.fulltext.md`, NORMALIZES it to a
+    canonical facet slug (closed FACET_VOCAB; unmatched → holding pen), then renders
+    the `zot:auto:facets` body region + `methods_used`/`systems_used` frontmatter.
+    Idempotent; only machine regions/keys touched.
+    """
+    from zotero_cli import facets as facmod
+    from zotero_cli import litnote as ln
+
+    db = get_db()
+    item = db.get_item(item_id=item_id)
+    if not item:
+        rprint(f"[red]Item {item_id} not found.[/red]")
+        raise typer.Exit(1)
+    sdir = Path(science_dir).expanduser()
+    slug = ln.vault_key2slug(sdir).get(item.key)
+    if not slug:
+        rprint("[red]No literature note for this item yet (run `zot litnote` first).[/red]")
+        raise typer.Exit(1)
+
+    fac = Path(json_path).expanduser() if json_path else (sdir / f"{slug}.facets.json")
+    ftpath = sdir / f"{slug}.fulltext.md"
+    if not fac.exists():
+        rprint(f"[red]No facets sidecar: {fac}[/red]")
+        raise typer.Exit(1)
+    resolved = facmod.process(json.loads(fac.read_text()), ftpath.read_text())
+    rprint(f"[bold]{slug}[/bold]")
+    rprint(f"  methods: {resolved['methods_used']}")
+    rprint(f"  systems: {resolved['systems_used']}")
+    if resolved["unresolved"]:
+        rprint(f"  [yellow]unresolved (holding pen):[/yellow] {[u['specific'] for u in resolved['unresolved']]}")
+    if resolved["dropped"]:
+        rprint(f"  [red]dropped (ungrounded):[/red] {[d['specific'] for d in resolved['dropped']]}")
+    if verify_only:
+        return
+    note = sdir / f"{slug}.md"
+    note.write_text(facmod.apply_facets(note.read_text(), resolved))
+    rprint(f"  [green]applied to[/green] {note.name}")
+
+
+@app.command("facets-review")
+def facets_review(
+    science_dir: str = typer.Option("~/notes/300-reference/science", "--dir", "-d"),
+):
+    """Corpus-wide holding pen: specifics that matched no facet, with counts.
+
+    Recurring entries are candidates to promote into FACET_VOCAB/FACET_ALIASES
+    (src/zotero_cli/facets.py) — agents propose, humans promote (keeps grouping clean).
+    """
+    from collections import Counter
+
+    from zotero_cli import facets as facmod
+
+    sdir = Path(science_dir).expanduser()
+    counts: Counter = Counter()
+    for fac in sdir.glob("*.facets.json"):
+        slug = fac.name[: -len(".facets.json")]
+        ftpath = sdir / f"{slug}.fulltext.md"
+        if not ftpath.exists():
+            continue
+        resolved = facmod.process(json.loads(fac.read_text()), ftpath.read_text())
+        for u in resolved["unresolved"]:
+            counts[(u["kind"], u["specific"])] += 1
+    if not counts:
+        rprint("[green]Holding pen empty — every grounded specific resolved to a facet.[/green]")
+        return
+    rprint(f"[bold]Unresolved facets ({len(counts)} distinct):[/bold]")
+    for (kind, spec), n in counts.most_common():
+        rprint(f"  {n:>2}× [{kind[:-1]}] {spec}")
 
 
 @app.command("moc-sync")
