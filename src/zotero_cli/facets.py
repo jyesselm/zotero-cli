@@ -323,9 +323,26 @@ def set_frontmatter_list(text: str, key: str, values: list[str]) -> str:
 
 
 def apply_facets(text: str, resolved: dict) -> str:
-    """Render facets into a note: body region (dedicated anchor, before figures) +
-    methods_used/systems_used frontmatter. Idempotent; used by litnote AND relink."""
-    text = set_region(text, "facets", facets_body(resolved), before=FIG_ANCHOR)
+    """Render facets into a note: body region + methods_used/systems_used frontmatter.
+    Idempotent; used by litnote AND relink.
+
+    Placement: if the region already exists it's replaced in place; otherwise it's
+    inserted at the first available anchor — before figures (the normal case), else
+    after the cited region, else after the summary, else before the human ## Notes.
+    This keeps a stable order (summary → cited → facets → figures) while still working
+    on older notes that lack a figures/cited region.
+    """
+    body = facets_body(resolved)
+    if "<!-- zot:auto:start:facets -->" in text or not body:
+        text = set_region(text, "facets", body)  # replace/remove in place
+    else:
+        for kind, anchor in (("before", FIG_ANCHOR),
+                             ("after", "<!-- zot:auto:end:cited -->"),
+                             ("after", "<!-- zot:auto:end:summary -->"),
+                             ("before", "\n## Notes")):
+            if anchor.strip() in text:
+                text = set_region(text, "facets", body, **{kind: anchor})
+                break
     text = set_frontmatter_list(text, "methods_used", resolved["methods_used"])
     text = set_frontmatter_list(text, "systems_used", resolved["systems_used"])
     return text
