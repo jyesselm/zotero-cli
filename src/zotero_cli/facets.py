@@ -256,6 +256,10 @@ def process(sidecar: dict, fulltext: str) -> dict:
     ):
         seen_slug, seen_disp = set(), set()
         for item in sidecar.get(kind, []):
+            if isinstance(item, str):          # tolerate a bare-string sidecar entry
+                item = {"specific": item}
+            elif not isinstance(item, dict):
+                continue
             spec = (item.get("specific") or "").strip()
             if not spec:
                 continue
