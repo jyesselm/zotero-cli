@@ -18,7 +18,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from zotero_cli.litnote import match_item, parse_numbered_refs, vault_key2slug
@@ -124,11 +124,27 @@ def _clean_doi(doi: str | None) -> str:
     return doi.lower().replace("https://doi.org/", "").strip()
 
 
-def forward_citations(lib, key_items, per_paper: int = 40, min_year: int = 2015) -> list[dict]:
-    """Signal B: recent papers that CITE your key papers, not already owned, ranked by
-    how many of your key papers they cite (then recency)."""
-    owned_dois, _ = _owned(lib)
-    agg: dict[str, dict] = {}
+def _meta(w: dict) -> dict:
+    venue = ((w.get("primary_location") or {}).get("source") or {}).get("display_name", "") or ""
+    return {"id": w["id"], "title": w.get("title") or "", "year": w.get("publication_year"),
+            "cites_n": w.get("cited_by_count", 0), "doi": _clean_doi(w.get("doi")), "venue": venue}
+
+
+_SEL = "id,doi,title,publication_year,cited_by_count,primary_location"
+
+
+def forward_and_canon(lib, key_items, since_year: int, per_paper: int = 60,
+                      canon_top: int = 120, canon_min: int = 3):
+    """Engines B + 3 in one pass (they share the same OpenAlex fetches).
+
+    B  = recent papers that CITE your key papers (ranked by how many of yours they cite).
+    E3 = the works those citing papers most often cite themselves ('what the new
+         literature in your area is built on'), recent + not-owned, ranked by frequency.
+    Returns (b_list, canon_list).
+    """
+    owned = {it.doi.lower() for it in lib if it.doi}
+    b_agg: dict[str, dict] = {}
+    refs: Counter = Counter()
     for it in key_items:
         doi = _clean_doi(it.doi)
         if not doi:
@@ -137,23 +153,33 @@ def forward_citations(lib, key_items, per_paper: int = 40, min_year: int = 2015)
         if not work or not work.get("id"):
             continue
         wid = work["id"].rsplit("/", 1)[-1]
-        res = _oa_get("works", filter=f"cites:{wid},from_publication_date:{min_year}-01-01",
-                      select="id,doi,title,publication_year,cited_by_count,primary_location",
-                      sort="cited_by_count:desc", per_page=per_paper)
+        res = _oa_get("works", filter=f"cites:{wid},from_publication_date:{since_year}-01-01",
+                      select=_SEL + ",referenced_works", sort="cited_by_count:desc", per_page=per_paper)
         for w in (res or {}).get("results", []):
-            wd = _clean_doi(w.get("doi"))
-            if wd and wd in owned_dois:
+            refs.update(w.get("referenced_works") or [])
+            if w["doi"] and _clean_doi(w["doi"]) in owned:
                 continue
-            k = w["id"]
-            if k not in agg:
-                venue = ((w.get("primary_location") or {}).get("source") or {}).get("display_name", "")
-                agg[k] = {"title": w.get("title") or "", "year": w.get("publication_year"),
-                          "cites_n": w.get("cited_by_count", 0), "doi": wd, "venue": venue,
-                          "via": set()}
-            agg[k]["via"].add(f"{it.first_author} {it.year}")
-    out = [{**v, "via": sorted(v["via"])} for v in agg.values() if v["title"]]
-    out.sort(key=lambda d: (-len(d["via"]), -(d["cites_n"] or 0)))
-    return out
+            m = b_agg.setdefault(w["id"], {**_meta(w), "via": set()})
+            m["via"].add(f"{it.first_author} {it.year}")
+    b_list = [{**v, "via": sorted(v["via"])} for v in b_agg.values() if v["title"]]
+    b_list.sort(key=lambda d: (-len(d["via"]), -(d["cites_n"] or 0)))
+
+    # Engine 3: batch-fetch metadata for the most co-cited references, then filter.
+    hot = [wid for wid, c in refs.most_common(canon_top) if c >= canon_min]
+    canon = []
+    for i in range(0, len(hot), 50):
+        chunk = "|".join(w.rsplit("/", 1)[-1] for w in hot[i:i + 50])
+        res = _oa_get("works", filter=f"openalex_id:{chunk}", select=_SEL, per_page=50)
+        for w in (res or {}).get("results", []):
+            m = _meta(w)
+            if (m["doi"] and m["doi"] in owned) or not m["title"]:
+                continue
+            if (m["year"] or 0) < since_year:
+                continue
+            m["freq"] = refs.get(w["id"], 0)
+            canon.append(m)
+    canon.sort(key=lambda d: (-d["freq"], -(d["cites_n"] or 0)))
+    return b_list, canon
 
 
 # facet leaf -> a precise search phrase (so OpenAlex keyword search isn't noisy).
