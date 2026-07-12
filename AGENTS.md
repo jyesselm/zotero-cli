@@ -78,6 +78,12 @@ Portability / files:
   `systems_used` frontmatter. Sidecar (`<slug>.facets.json`, written by the `facet-extractor` agent)
   is the source of truth — `litnote`/`relink` re-render from it. `zot facets-review` → holding-pen
   report (promote recurring terms into `facets.py`; agents propose, humans promote → no sprawl).
+- `zot discover [--offline] [-n N] [-o path]` → build a **reading list** of papers to consider,
+  written to `READING-LIST.md` (checkbox table). Three signals: **A** co-citation gaps (works your
+  notes' reference lists cite ≥N times but you don't own — self-contained, `src/zotero_cli/discover.py`);
+  **B** forward citations (OpenAlex: recent papers citing your key/my-paper items); **C** facet-similarity
+  (OpenAlex title+abstract search on your top method×system combos). `--offline` = Signal A only.
+  **Review-only: adds NOTHING to Zotero** — the user approves each paper. Dedups against the library.
 
 ---
 
